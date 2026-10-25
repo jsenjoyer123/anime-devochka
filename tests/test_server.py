@@ -1,0 +1,212 @@
+"""Тесты бэкенда Айко: песочница файлов, git, подтверждение команд, история, HTTP-защита.
+
+Запуск:  .venv/bin/python -m unittest discover -s tests
+Модель не вызывается — вместо неё подставляется сценарий ответов.
+"""
+
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import unittest
+import urllib.error
+import urllib.request
+from http.server import ThreadingHTTPServer
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import devtools  # noqa: E402
+import server  # noqa: E402
+
+
+def make_project(root: Path) -> None:
+    (root / "src").mkdir()
+    (root / "src" / "app.py").write_text("def main():\n    return 42\n", encoding="utf-8")
+    (root / "README.md").write_text("# Demo\n", encoding="utf-8")
+    (root / ".env").write_text("SECRET=1\n", encoding="utf-8")
+    (root / "node_modules").mkdir()
+    (root / "node_modules" / "junk.js").write_text("x", encoding="utf-8")
+    git = ["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run([*git, "init", "-q"], check=True)
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-qm", "init"], check=True)
+
+
+def scripted(*messages):
+    """Подменяет модель: отдаёт заготовленные сообщения по очереди."""
+    queue = list(messages)
+    return lambda msgs, emit: queue.pop(0)
+
+
+def tool_call(cid: str, name: str, **args) -> dict:
+    return {"id": cid, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+
+
+class Base(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.root = self.tmp / "proj"
+        self.root.mkdir()
+        make_project(self.root)
+        self.notes = self.tmp / "notes"
+        # общая память и список проектов — тоже во временной папке
+        self._paths = (server.SENPAI_PATH, server.RECENT_PATH)
+        server.SENPAI_PATH = self.notes / "_senpai.md"
+        server.RECENT_PATH = self.notes / "_projects.json"
+        self.ws = server.Workspace(self.root, self.notes / "proj.md")
+
+    def tearDown(self):
+        server.SENPAI_PATH, server.RECENT_PATH = self._paths
+        shutil.rmtree(self.tmp)
+
+
+class WorkspaceTest(Base):
+    def test_reads_inside_project(self):
+        self.assertIn("return 42", self.ws.read_file("src/app.py"))
+
+    def test_blocks_escape_and_secrets(self):
+        self.assertIn("вне проекта", self.ws.call("read_file", {"path": "../../etc/passwd"}))
+        self.assertIn("секреты", self.ws.read_file(".env"))
+        self.assertNotIn(".env", self.ws.search("SECRET"))
+
+    def test_ignores_node_modules(self):
+        self.assertIn("пропущено", self.ws.list_dir("."))
+        self.assertEqual(self.ws.search("x", "*.js"), "Ничего не нашлось.")
+
+    def test_outfit_is_sanitized(self):
+        self.ws.set_outfit(name="X" * 99, top_color="red<script>", accessory="rocket", badge_text="PYTHON")
+        o = self.ws.outfit()
+        self.assertEqual((len(o["name"]), o["top_color"], o["accessory"], o["badge_text"]),
+                         (32, "#ffffff", "none", "PYT"))
+
+    def test_remember_is_capped(self):
+        for i in range(server.MAX_SENPAI_LINES + 5):
+            self.ws.remember(f"факт {i}")
+        lines = server.SENPAI_PATH.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), server.MAX_SENPAI_LINES)
+        self.assertTrue(lines[-1].endswith(f"факт {server.MAX_SENPAI_LINES + 4}"))
+
+
+class DevtoolsTest(Base):
+    def test_git_read_only_tools(self):
+        self.assertIn("init", devtools.git_log(self.root))
+        self.assertIn("src/app.py", devtools.git_hotspots(self.root))
+        (self.root / "new.txt").write_text("hi", encoding="utf-8")
+        self.assertIn("?? new.txt", devtools.git_diff(self.root))
+
+    def test_rejects_option_injection(self):
+        self.assertIn("Некорректный", devtools.git_show(self.root, "--output=/tmp/pwn"))
+
+    def test_run_command_keeps_only_tail(self):
+        out = devtools.run_command(self.root, "seq 1 100000")
+        self.assertIn("код выхода 0", out)
+        self.assertIn("100000", out)
+        self.assertLess(len(out), devtools.MAX_RUN_CHARS + 200)
+
+
+class AgentTest(Base):
+    def make_agent(self, *messages):
+        agent = server.Agent(self.ws, "key", "model")
+        agent._llm = scripted(*messages)
+        return agent
+
+    def test_confirmation_required(self):
+        agent = self.make_agent(
+            {"role": "assistant", "content": None, "tool_calls": [
+                tool_call("1", "run_command", command="echo yes-ran", reason="t"),
+                tool_call("2", "run_command", command="echo never-ran", reason="t")]},
+            {"role": "assistant", "content": "готово"},
+        )
+        answers = iter([True, False])
+
+        def emit(ev):
+            if ev["type"] == "confirm":
+                threading.Timer(0.05, agent.resolve_confirm, (ev["id"], next(answers))).start()
+
+        agent.run("go", emit)
+        results = [m["content"] for m in agent.history if m["role"] == "tool"]
+        self.assertIn("yes-ran", results[0])
+        self.assertIn("запретил", results[1])
+
+    def test_history_repaired_after_disconnect(self):
+        agent = self.make_agent({"role": "assistant", "content": None, "tool_calls": [
+            tool_call("1", "list_dir", path="."), tool_call("2", "list_dir", path="src")]})
+        calls = 0
+
+        def emit(ev):
+            nonlocal calls
+            calls += 1
+            if calls == 2:  # браузер ушёл на втором инструменте
+                raise BrokenPipeError
+
+        with self.assertRaises(BrokenPipeError):
+            agent.run("go", emit)
+        self.assertEqual([m["role"] for m in agent.history], ["user"])
+
+    def test_compaction_keeps_tool_pairs(self):
+        agent = self.make_agent()
+        agent.history = [{"role": "user", "content": "old"}] + [{"role": "assistant", "content": "a"}] * 5
+        agent.history.append({"role": "user", "content": "now"})
+        for i in range(50):
+            agent.history.append({"role": "assistant", "content": None, "tool_calls": [{"id": str(i)}]})
+            agent.history.append({"role": "tool", "tool_call_id": str(i), "content": "y" * 1000})
+        agent._compact()
+        self.assertEqual(agent.history[0]["content"], "now")
+        self.assertTrue(agent.history[1].get("tool_calls"))
+        self.assertLess(len(agent.history[2]["content"]), 400)
+
+
+class HttpTest(Base):
+    def setUp(self):
+        super().setUp()
+        server.API_KEY, server.MODEL = "key", "model"
+        server.AGENTS.clear()
+        server.open_project(self.root)
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        self.port = self.httpd.server_address[1]
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        super().tearDown()
+
+    def post(self, path, body, headers=None):
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json", **(headers or {})})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, json.load(r)
+        except urllib.error.HTTPError as e:
+            return e.code, json.load(e)
+
+    def test_status(self):
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/status", timeout=5) as r:
+            self.assertEqual(json.load(r)["project"], "proj")
+
+    def test_rejects_foreign_sites(self):
+        self.assertEqual(self.post("/api/chat", {"message": "hi"}, {"Origin": "http://evil.com"})[0], 403)
+        self.assertEqual(self.post("/api/chat", {"message": "hi"}, {"Content-Type": "text/plain"})[0], 403)
+        self.assertEqual(self.post("/api/confirm", {}, {"Host": "evil.com"})[0], 403)
+
+    def test_switch_project(self):
+        other = self.tmp / "other"
+        other.mkdir()
+        self.assertEqual(self.post("/api/project", {"path": str(other)}), (200, {"ok": True, "project": "other"}))
+        self.assertEqual(self.post("/api/project", {"path": "/no/such/dir"})[0], 400)
+        self.assertEqual(server.recent_projects()[:2], [str(other), str(self.root)])
+
+
+class SeasonTest(unittest.TestCase):
+    def test_seasons(self):
+        from datetime import date
+        self.assertIn("Хэллоуин", server.season_hint(date(2026, 10, 31)))
+        self.assertIn("новогодние", server.season_hint(date(2027, 1, 3)))
+        self.assertEqual(server.season_hint(date(2026, 7, 1)), "")
+
+
+if __name__ == "__main__":
+    unittest.main()
