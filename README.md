@@ -8,7 +8,7 @@
 
 ```bash
 cp .env.example .env                      # впиши OPENROUTER_API_KEY
-uv venv .venv && uv pip install --python .venv/bin/python edge-tts   # голос
+uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt   # голос
 .venv/bin/python server.py ~/path/to/project                         # открой http://127.0.0.1:8765
 ```
 
@@ -77,6 +77,22 @@ ln -s "$PWD/vscode-extension" ~/.vscode/extensions/anime-devochka.aiko-chan-0.1.
 - Рендер ограничен 30 FPS и пониженным разрешением, во сне — 10 FPS, во скрытой вкладке стоит.
 - Файлы читаются построчно с лимитами, вывод команд пишется во временный файл, история диалога сжимается.
 - Mermaid подгружается только при первой схеме; запись с микрофона — не длиннее 30 секунд.
+
+## Разработка
+
+Бэкенд — Python 3.10+ без фреймворков:
+
+- `workspace.py` — песочница файлов и память (заметки, семпай, проекты);
+- `agent.py` — персона, задания и цикл tool calling;
+- `llm.py` — OpenRouter (LLM, распознавание речи) и edge-tts;
+- `http_api.py` — HTTP-сервер и API;
+- `server.py` — точка входа.
+
+```bash
+.venv/bin/python -m unittest discover -s tests    # тесты бэкенда, модель не вызывается
+```
+
+Тесты гоняет CI на каждый пуш (`.github/workflows/tests.yml`).
 
 ## Безопасность
 
