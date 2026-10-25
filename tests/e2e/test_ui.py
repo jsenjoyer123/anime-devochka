@@ -116,6 +116,17 @@ class UiTest(unittest.TestCase):
         self.page.wait_for_selector("text=коммитим")
         self.assertEqual(self.confirms[0]["message"], "fix: поправила привет")
 
+    def test_diff_on_screen(self):
+        self.chat_replies({"type": "diff", "title": "app.py · правки",
+                           "diff": "diff --git a/app.py b/app.py\n@@ -1 +1 @@\n-print('hi')\n+print('привет')"},
+                          {"type": "reply", "text": "вот"})
+        self.open()
+        self.say("покажи правки")
+        self.page.wait_for_selector("#screen pre.diff")
+        self.assertEqual(self.page.text_content("#screen-title"), "app.py · правки")
+        classes = self.page.eval_on_selector_all("#screen pre.diff span", "els => els.map(e => e.className)")
+        self.assertEqual(classes, ["file", "hunk", "del", "add"])
+
     def test_allowed_commands_in_menu(self):
         self.agent.ws.set_allowed("make lint", True)
         self.open()

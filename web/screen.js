@@ -1,4 +1,4 @@
-// «Экран стрима» рядом с Айко: фрагменты кода и Mermaid-схемы.
+// «Экран стрима» рядом с Айко: фрагменты кода, diff и Mermaid-схемы.
 // Хранит несколько последних показов, чтобы можно было пролистать назад.
 // Mermaid тяжёлый (~2 МБ), поэтому грузим его только при первой схеме.
 
@@ -30,6 +30,10 @@ export function showCode({ path, start, code, caption }) {
   push({ kind: "code", title: `${path}:${start}${caption ? ` — ${caption}` : ""}`, start, code });
 }
 
+export function showDiff({ title, diff }) {
+  push({ kind: "diff", title, diff });
+}
+
 export function showDiagram({ title, mermaid }) {
   push({ kind: "diagram", title: title || "Схема", source: mermaid });
 }
@@ -49,6 +53,7 @@ function go(i) {
   nextBtn.disabled = i === items.length - 1;
   screen.hidden = false;
   if (item.kind === "code") renderCode(item);
+  else if (item.kind === "diff") renderDiff(item);
   else renderDiagram(item);
 }
 
@@ -57,6 +62,26 @@ function renderCode({ start, code }) {
   pre.style.setProperty("--start", String(start - 1));
   for (const line of code.split("\n")) {
     const span = document.createElement("span");
+    span.textContent = line || " ";
+    pre.append(span);
+  }
+  body.replaceChildren(pre);
+}
+
+function diffClass(line) {
+  if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("diff ") || line.startsWith("index ")) return "file";
+  if (line.startsWith("@@")) return "hunk";
+  if (line.startsWith("+")) return "add";
+  if (line.startsWith("-")) return "del";
+  return "";
+}
+
+function renderDiff({ diff }) {
+  const pre = document.createElement("pre");
+  pre.className = "diff";
+  for (const line of diff.split("\n")) {
+    const span = document.createElement("span");
+    span.className = diffClass(line);
     span.textContent = line || " ";
     pre.append(span);
   }

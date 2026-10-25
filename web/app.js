@@ -3,7 +3,7 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
 import { applyOutfit, removeOutfit } from "./outfit.js";
 import { Motion, idlePose, GESTURE_NAMES } from "./motion.js";
-import { showCode, showDiagram, isScreenVisible } from "./screen.js";
+import { showCode, showDiff, showDiagram, isScreenVisible } from "./screen.js";
 import { Ear } from "./mic.js";
 
 // Если своей модели нет в web/models/aiko.vrm — берём пример из репозитория three-vrm
@@ -750,6 +750,9 @@ function handleEvent(ev) {
   } else if (ev.type === "code") {
     showCode(ev);
     mirror({ t: "code", ev });
+  } else if (ev.type === "diff") {
+    showDiff(ev);
+    mirror({ t: "diff", ev });
   } else if (ev.type === "diagram") {
     showDiagram(ev);
     mirror({ t: "diagram", ev });
@@ -1342,6 +1345,8 @@ if (OBS) {
       thinkingEl.textContent = ev.text;
     } else if (ev.t === "code") {
       showCode(ev.ev);
+    } else if (ev.t === "diff") {
+      showDiff(ev.ev);
     } else if (ev.t === "diagram") {
       showDiagram(ev.ev);
     } else if (ev.t === "outfit") {

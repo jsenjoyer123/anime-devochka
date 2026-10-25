@@ -47,7 +47,7 @@ PERSONA = """Ты — Айко-тян, AI-витубер в стиле Neuro-sam
 Cargo.toml, Makefile, Dockerfile...) → README → точки входа → ядро логики.
 
 У тебя есть «экран стрима»: когда объясняешь код — показывай его через show_code, \
-схемы — через show_diagram (Mermaid). История проекта — git_log, git_show, git_blame, \
+изменения — через show_diff, схемы — через show_diagram (Mermaid). История проекта — git_log, git_show, git_blame, \
 git_hotspots, git_diff. Команды (тесты, сборку, линтер) запускай через run_command — \
 семпай сначала подтвердит; ничего разрушительного не предлагай.
 
@@ -88,8 +88,8 @@ TOUR_TASK = """Семпай хочет экскурсию по проекту. �
 
 REVIEW_TASK = """Семпай просит код-ревью текущих изменений. Посмотри git_diff (и staged=true), \
 при необходимости — окружающий код. Сделай ревью в своём стиле: сначала главное — баги и риски, \
-потом стиль и мелочи. Ссылайся на `файл:строка`, самые важные места покажи через show_code. \
-Если изменений нет — так и скажи."""
+потом стиль и мелочи. Ссылайся на `файл:строка`, самые важные места покажи через show_diff (сам diff) или show_code \
+(окружающий код). Если изменений нет — так и скажи."""
 
 DOC_TASK = """Составь для новых людей в команде документ ONBOARDING.md (Markdown, по-русски): \
 что это за проект, как поднять окружение, как запустить и протестировать, архитектуру \
@@ -107,7 +107,8 @@ FIRST_TASK = """Семпай хочет выбрать первую задачу
 COMMIT_TASK = """Семпай хочет закоммитить изменения. Посмотри git_diff со staged=true; если в индексе \
 пусто — git_diff без него (тогда коммить с add_all=true). Загляни в git_log, чтобы попасть в стиль \
 сообщений проекта (язык, префиксы вроде feat:/fix:). Если в изменениях есть явный мусор, отладочный \
-print или секреты — сначала скажи об этом. Затем вызови commit с сообщением: первая строка до 72 \
+print или секреты — сначала скажи об этом. Покажи семпаю, что уходит в коммит, через show_diff. \
+Затем вызови commit с сообщением: первая строка до 72 \
 символов, при необходимости — пустая строка и пара пунктов подробностей. Без тегов эмоций в сообщении. \
 Если изменений нет — так и скажи."""
 
@@ -285,6 +286,17 @@ TOOLS = [
         }, "required": ["path", "start_line", "end_line"]},
     }},
     {"type": "function", "function": {
+        "name": "show_diff",
+        "description": "Показать семпаю на экране стрима diff с подсветкой +/- (до 150 строк): "
+                       "незакоммиченные правки, staged или коммит; весь или по одному файлу.",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string", "description": "Файл; без него — все изменения"},
+            "staged": {"type": "boolean", "default": False},
+            "commit": {"type": "string", "description": "Хеш или HEAD~N — показать коммит вместо рабочей копии"},
+            "caption": {"type": "string", "description": "Короткая подпись"},
+        }},
+    }},
+    {"type": "function", "function": {
         "name": "show_diagram",
         "description": "Показать схему на экране стрима. Код Mermaid (flowchart, sequenceDiagram и т.п.).",
         "parameters": {"type": "object", "properties": {
@@ -363,6 +375,8 @@ def describe_call(name: str, args: dict) -> str:
         return f"показываю {args.get('path')}"
     if name == "show_diagram":
         return "рисую схему ✏"
+    if name == "show_diff":
+        return f"показываю изменения{' в ' + args['path'] if args.get('path') else ''}"
     if name == "write_onboarding_doc":
         return "пишу ONBOARDING.md ✎"
     if name == "remember":
@@ -579,6 +593,13 @@ class Agent:
                 snippet = self.ws.code_snippet(args["path"], args["start_line"], args["end_line"])
                 emit({"type": "code", "caption": str(args.get("caption") or "")[:120], **snippet})
                 return f"Показала {snippet['path']}:{snippet['start']} на экране"
+            if name == "show_diff":
+                diff = self.ws.diff_snippet(args.get("path"), args.get("staged") is True, args.get("commit"))
+                what = args.get("commit") or ("staged" if args.get("staged") else "правки")
+                title = f"{args.get('path') or 'diff'} · {what}"
+                caption = str(args.get("caption") or "")[:120]
+                emit({"type": "diff", "title": f"{title} — {caption}" if caption else title, "diff": diff})
+                return "Diff на экране"
             if name == "show_diagram":
                 emit({"type": "diagram", "title": str(args.get("title") or "")[:120],
                       "mermaid": str(args["mermaid"])[:8000]})

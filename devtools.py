@@ -20,6 +20,7 @@ GIT_TIMEOUT = 15
 MAX_GIT_CHARS = 15_000
 RUN_TIMEOUT = 180
 MAX_RUN_CHARS = 8_000
+MAX_DIFF_LINES = 150  # строк diff на экран стрима
 COMMIT_TIMEOUT = 120  # с запасом на pre-commit хуки
 MAX_COMMIT_MESSAGE = 2_000
 
@@ -83,6 +84,25 @@ def git_diff(root: Path, staged: bool = False) -> str:
     # новые файлы в diff не попадают — показываем их списком из status
     status = _git(root, "status", "--short", "--untracked-files=all")
     return f"git status:\n{status}\n\n{_git(root, *args)}"
+
+
+def screen_diff(root: Path, rel: str | None = None, staged: bool = False, commit: str | None = None) -> str:
+    """Diff для экрана стрима: изменения в рабочей копии, в индексе или в коммите."""
+    if commit:
+        if not REV_RE.match(commit):
+            raise ValueError("Некорректный коммит: нужен хеш или HEAD~N.")
+        args = ["show", "--format=", "--patch", "--no-ext-diff", "--no-textconv", commit]
+    else:
+        args = ["diff", "--patch", "--no-ext-diff", "--no-textconv", *(["--staged"] if staged else [])]
+    out = _git(root, *args, *(["--", rel] if rel else []))
+    if out.startswith(("Это не", "git ")):
+        raise ValueError(out)
+    if out == "(пусто)":
+        raise ValueError("Изменений нет — показывать нечего.")
+    lines = out.splitlines()
+    if len(lines) > MAX_DIFF_LINES:
+        lines = lines[:MAX_DIFF_LINES] + [f"... (ещё {len(lines) - MAX_DIFF_LINES} строк — сузь до файла)"]
+    return "\n".join(line[:300] for line in lines)
 
 
 def changes(root: Path) -> dict:

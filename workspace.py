@@ -265,6 +265,15 @@ class Workspace:
                     lines.append(line.rstrip("\n")[:300])
         return {"path": self._rel(p), "start": start, "code": "\n".join(lines)}
 
+    def diff_snippet(self, path: str | None = None, staged: bool = False, commit: str | None = None) -> str:
+        rel = None
+        if path:
+            p = self._resolve(path)
+            if self._is_secret(p.name):
+                raise ValueError(f"Не могу показать {path}")
+            rel = self._rel(p)
+        return devtools.screen_diff(self.root, rel, bool(staged), commit or None)
+
     # git — только чтение; пути проверяем так же, как для файлов
     def git_log(self, path: str | None = None, max_count: int = 20) -> str:
         rel = self._rel(self._resolve(path)) if path else None

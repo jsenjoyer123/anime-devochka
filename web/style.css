@@ -233,6 +233,13 @@ button.on { background: #e2336b; color: #fff; }
   text-align: right;
   opacity: .4;
 }
+#screen-body pre.diff { width: max-content; min-width: 100%; }
+#screen-body pre.diff span::before { content: none; }
+#screen-body pre.diff span { padding: 0 12px; }
+#screen-body pre.diff .add { background: rgba(70, 200, 110, .18); color: #9ff0b4; }
+#screen-body pre.diff .del { background: rgba(255, 90, 110, .18); color: #ffb3bd; }
+#screen-body pre.diff .hunk { color: #b9a6ff; }
+#screen-body pre.diff .file { color: #ff9cc9; font-weight: 700; }
 #screen-body .diagram { padding: 0 12px; background: #fff; }
 #screen-body .diagram svg { max-width: 100%; height: auto; }
 

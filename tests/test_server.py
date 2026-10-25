@@ -376,6 +376,36 @@ class CommitTest(Base):
         self.assertEqual(devtools.head(self.root), before)
 
 
+class DiffTest(Base):
+    def test_screen_diff(self):
+        with self.assertRaisesRegex(ValueError, "нечего"):
+            self.ws.diff_snippet()
+        (self.root / "src" / "app.py").write_text("def main():\n    return 7\n", encoding="utf-8")
+        diff = self.ws.diff_snippet("src/app.py")
+        self.assertIn("-    return 42", diff)
+        self.assertIn("+    return 7", diff)
+        self.assertIn("+# Demo", self.ws.diff_snippet(commit="HEAD"))
+        with self.assertRaisesRegex(ValueError, "Некорректный"):
+            self.ws.diff_snippet(commit="--output=/tmp/x")
+        with self.assertRaisesRegex(ValueError, "Не могу"):
+            self.ws.diff_snippet(".env")
+
+    def test_diff_is_trimmed_and_emitted(self):
+        (self.root / "big.txt").write_text("".join(f"{i}\n" for i in range(500)), encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.root), "add", "big.txt"], check=True)
+        agent = agent_mod.Agent(self.ws, "key", "model")
+        agent._llm = scripted(
+            {"role": "assistant", "content": None, "tool_calls": [tool_call("1", "show_diff", staged=True)]},
+            {"role": "assistant", "content": "вот"},
+        )
+        events = []
+        agent.run("покажи", events.append)
+        diff = next(e for e in events if e["type"] == "diff")
+        self.assertEqual(diff["title"], "diff · staged")
+        self.assertEqual(len(diff["diff"].splitlines()), devtools.MAX_DIFF_LINES + 1)
+        self.assertIn("сузь до файла", diff["diff"])
+
+
 class ProjectMemoryAndEditorTest(Base):
     def test_project_memory_survives_relearn(self):
         agent = agent_mod.Agent(self.ws, "key", "model")
