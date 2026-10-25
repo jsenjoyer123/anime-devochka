@@ -22,6 +22,16 @@ jobs:
       - name: "Тесты бэкенда (модель не вызывается)"
         run: python -m unittest discover -s tests -v
 
+  vscode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: "Расширение VS Code (vscode подменён заглушкой)"
+        run: node --test tests/vscode
+
   e2e:
     runs-on: ubuntu-latest
     steps:

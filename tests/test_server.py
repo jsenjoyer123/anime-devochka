@@ -248,6 +248,14 @@ class HttpTest(Base):
         self.assertEqual(http_api.AGENT.editor["path"], "src/app.py")
         self.assertEqual(self.post("/api/context", {"path": "/tmp"})[1]["ok"], False)
 
+    def test_annotations_endpoint(self):
+        http_api.AGENT.set_annotations([{"path": "src/app.py", "line": 1, "message": "хм"}])
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/annotations", timeout=5) as r:
+            data = json.load(r)
+        self.assertEqual((data["root"], data["version"], len(data["notes"])), (str(self.root), 1, 1))
+        self.assertEqual(self.post("/api/annotations", {"clear": True}), (200, {"ok": True}))
+        self.assertEqual(http_api.AGENT.annotations, {"version": 2, "notes": []})
+
     def test_allowed_can_only_be_revoked(self):
         http_api.AGENT.ws.set_allowed("make test", True)
         self.assertEqual(self.post("/api/allowed", {"command": "make test"}), (200, {"allowed": []}))
@@ -484,6 +492,28 @@ class ProjectMemoryAndEditorTest(Base):
         self.assertIn("тесты запускаются через make test", prompt)
         self.assertIn("# новые заметки", prompt)
         self.assertFalse(workspace.SENPAI_PATH.exists())  # общая память о семпае не тронута
+
+    def test_annotations_are_validated(self):
+        agent = agent_mod.Agent(self.ws, "key", "model")
+        agent._llm = scripted(
+            {"role": "assistant", "content": None, "tool_calls": [tool_call("1", "annotate", notes=[
+                {"path": "src/app.py", "line": 2, "severity": "error", "message": "магическое   число"},
+                {"path": "src/app.py", "line": "x", "message": "кривая строка"},
+                {"path": "../../etc/passwd", "line": 1, "message": "побег"},
+                {"path": ".env", "line": 1, "message": "секрет"},
+                {"path": "nope.py", "line": 1, "message": "нет файла"},
+                {"path": "README.md", "line": -5, "severity": "panic", "message": "заголовок"},
+                "мусор",
+            ])]},
+            {"role": "assistant", "content": "готово"},
+        )
+        events = []
+        agent.run("ревью", events.append)
+        self.assertEqual(agent.annotations, {"version": 1, "notes": [
+            {"path": "src/app.py", "line": 2, "severity": "error", "message": "магическое число"},
+            {"path": "README.md", "line": 1, "severity": "warning", "message": "заголовок"},
+        ]})
+        self.assertEqual(len(next(e for e in events if e["type"] == "annotations")["notes"]), 2)
 
     def test_editor_context(self):
         agent = agent_mod.Agent(self.ws, "key", "model")

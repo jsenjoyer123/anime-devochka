@@ -772,6 +772,11 @@ function handleEvent(ev) {
     mirror({ t: "diagram", ev });
   } else if (ev.type === "confirm") {
     askConfirm(ev);
+  } else if (ev.type === "annotations") {
+    if (ev.notes.length) {
+      const where = ev.notes.slice(0, 4).map((n) => `\`${n.path}:${n.line}\``).join(", ");
+      addMessage("tool", `📌 ${ev.notes.length} замечаний в редакторе: ${where}${ev.notes.length > 4 ? "…" : ""}`);
+    }
   } else if (ev.type === "usage") {
     turnCost += ev.cost;
     showSpent(ev.today);

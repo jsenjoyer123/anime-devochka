@@ -113,6 +113,9 @@ class Handler(SimpleHTTPRequestHandler):
             return self._events()
         if self.path == "/api/changes":
             return self._json(200, devtools.changes(agent.ws.root))
+        if self.path == "/api/annotations":
+            # расширение VS Code: замечания ревью для подчёркиваний; root — чтобы собрать полные пути
+            return self._json(200, {"root": str(agent.ws.root), **agent.annotations})
         if self.path == "/api/status":
             return self._json(200, {
                 "project": agent.ws.root.name,
@@ -188,7 +191,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         if self.path not in ("/api/chat", "/api/tts", "/api/confirm", "/api/stt", "/api/project", "/api/broadcast",
-                             "/api/context", "/api/allowed"):
+                             "/api/context", "/api/allowed", "/api/annotations"):
             return self._json(404, {"error": "not found"})
         if not self._same_origin():
             return self._json(403, {"error": "forbidden"})
@@ -215,6 +218,9 @@ class Handler(SimpleHTTPRequestHandler):
             ok = agent.resolve_confirm(str(body.get("id", "")), body.get("approve") is True,
                                        edited if isinstance(edited, str) else None, body.get("always") is True)
             return self._json(200 if ok else 404, {"ok": ok})
+        if self.path == "/api/annotations":
+            agent.set_annotations([])  # «убрать замечания» из VS Code
+            return self._json(200, {"ok": True})
         if self.path == "/api/allowed":
             # отсюда можно только забрать разрешение: выдаётся оно лишь кнопкой при подтверждении
             agent.ws.set_allowed(str(body.get("command", "")), False)

@@ -72,6 +72,9 @@ ln -s "$PWD/vscode-extension" ~/.vscode/extensions/anime-devochka.aiko-chan-0.1.
 секреты не отправляются), — можно спрашивать «а что делает вот это?» без копирования кода.
 Выключается настройкой `aiko.shareEditor`.
 
+После «🔍 Ревью» её замечания появляются в редакторе подчёркиваниями на нужных строках
+(и во вкладке «Проблемы»); убрать — командой «Айко: Убрать замечания Айко».
+
 ## Из чего сделана
 
 - **3D:** three.js + [@pixiv/three-vrm](https://github.com/pixiv/three-vrm), грузятся с CDN.
@@ -104,6 +107,7 @@ ln -s "$PWD/vscode-extension" ~/.vscode/extensions/anime-devochka.aiko-chan-0.1.
 ```bash
 .venv/bin/python -m unittest discover -s tests    # тесты бэкенда, модель не вызывается
 uv run --with playwright python -m unittest discover -s tests/e2e   # фронт в настоящем Chromium
+node --test tests/vscode                          # расширение VS Code (vscode — заглушка)
 ```
 
 E2E-тесты поднимают сервер и браузер, а ответы модели подменяют заготовленным NDJSON.

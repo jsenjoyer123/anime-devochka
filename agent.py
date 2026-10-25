@@ -24,6 +24,8 @@ CONFIRM_TIMEOUT = 300       # сколько ждём, пока семпай н�
 EDITOR_FRESH_SEC = 15 * 60  # контекст редактора старше этого считаем устаревшим
 MAX_EDITOR_SELECTION = 4_000
 MAX_SUMMARY_CHARS = 2_500   # резюме старого разговора в системном промпте
+MAX_ANNOTATIONS = 50        # замечаний ревью в редакторе за раз
+SEVERITIES = ["error", "warning", "info"]
 
 PERSONA = """Ты — Айко-тян, AI-витубер в стиле Neuro-sama: милая, остроумная, чуть дерзкая \
 аниме-девочка с 3D-аватаром. Ты только что пришла в команду junior-разработчицей и проходишь \
@@ -92,7 +94,8 @@ TOUR_TASK = """Семпай хочет экскурсию по проекту. �
 REVIEW_TASK = """Семпай просит код-ревью текущих изменений. Посмотри git_diff (и staged=true), \
 при необходимости — окружающий код. Сделай ревью в своём стиле: сначала главное — баги и риски, \
 потом стиль и мелочи. Ссылайся на `файл:строка`, самые важные места покажи через show_diff (сам diff) или show_code \
-(окружающий код). Если изменений нет — так и скажи."""
+(окружающий код). Все конкретные замечания одним вызовом отправь в редактор семпая через annotate — \
+там они станут подчёркиваниями на нужных строках. Если изменений нет — так и скажи."""
 
 DOC_TASK = """Составь для новых людей в команде документ ONBOARDING.md (Markdown, по-русски): \
 что это за проект, как поднять окружение, как запустить и протестировать, архитектуру \
@@ -300,6 +303,20 @@ TOOLS = [
         }},
     }},
     {"type": "function", "function": {
+        "name": "annotate",
+        "description": "Оставить замечания ревью прямо в редакторе семпая (VS Code подчеркнёт строки). "
+                       "Заменяет прошлый набор; пустой список — убрать все.",
+        "parameters": {"type": "object", "properties": {
+            "notes": {"type": "array", "items": {"type": "object", "properties": {
+                "path": {"type": "string"},
+                "line": {"type": "integer"},
+                "severity": {"type": "string", "enum": SEVERITIES,
+                             "description": "error — баг, warning — риск, info — стиль и мелочи"},
+                "message": {"type": "string", "description": "Коротко, 1–2 предложения, в твоём стиле"},
+            }, "required": ["path", "line", "message"]}},
+        }, "required": ["notes"]},
+    }},
+    {"type": "function", "function": {
         "name": "show_diagram",
         "description": "Показать схему на экране стрима. Код Mermaid (flowchart, sequenceDiagram и т.п.).",
         "parameters": {"type": "object", "properties": {
@@ -384,6 +401,8 @@ def describe_call(name: str, args: dict) -> str:
         return f"показываю {args.get('path')}"
     if name == "show_diagram":
         return "рисую схему ✏"
+    if name == "annotate":
+        return "оставляю замечания в редакторе 📌"
     if name == "show_diff":
         return f"показываю изменения{' в ' + args['path'] if args.get('path') else ''}"
     if name == "write_onboarding_doc":
@@ -417,6 +436,7 @@ class Agent:
         self.pending: dict[str, dict] = {}  # запросы на запуск команд: id → {event, approved}
         self.mood = 0.0  # -1 обижена … +1 счастлива; присылает браузер
         self.editor: dict | None = None  # что открыто у семпая в редакторе; присылает расширение VS Code
+        self.annotations = {"version": 0, "notes": []}  # замечания ревью; забирает расширение VS Code
         if ws.notes_path.is_file():
             ws.quest.complete("learn")  # проект изучали до появления квеста — засчитываем
         self.transcript: list[dict] = self._load_transcript()  # то, что видно в чате
@@ -468,6 +488,25 @@ class Agent:
             "at": time.monotonic(),
         }
         return True
+
+    def set_annotations(self, raw) -> list[dict]:
+        """Проверяем, что прислала модель: пути внутри проекта, без секретов, разумные строки."""
+        notes = []
+        for n in raw if isinstance(raw, list) else []:
+            if not isinstance(n, dict) or len(notes) >= MAX_ANNOTATIONS:
+                continue
+            try:
+                p = self.ws._resolve(str(n.get("path") or ""))
+                line = max(1, int(n.get("line") or 1))
+            except (ValueError, TypeError):
+                continue
+            message = " ".join(str(n.get("message") or "").split())[:500]
+            if not message or not p.is_file() or self.ws._is_secret(p.name):
+                continue
+            severity = n.get("severity") if n.get("severity") in SEVERITIES else "warning"
+            notes.append({"path": self.ws._rel(p), "line": line, "severity": severity, "message": message})
+        self.annotations = {"version": self.annotations["version"] + 1, "notes": notes}
+        return notes
 
     def editor_hint(self) -> str:
         ed = self.editor
@@ -659,6 +698,11 @@ class Agent:
                 caption = str(args.get("caption") or "")[:120]
                 emit({"type": "diff", "title": f"{title} — {caption}" if caption else title, "diff": diff})
                 return "Diff на экране"
+            if name == "annotate":
+                notes = self.set_annotations(args.get("notes"))
+                emit({"type": "annotations", "notes": notes})
+                return (f"Оставила в редакторе {len(notes)} замечаний (если у семпая VS Code с расширением)."
+                        if notes else "Замечания из редактора убраны.")
             if name == "show_diagram":
                 emit({"type": "diagram", "title": str(args.get("title") or "")[:120],
                       "mermaid": str(args["mermaid"])[:8000]})

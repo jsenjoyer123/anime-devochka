@@ -23,7 +23,8 @@
     "commands": [
       { "command": "aiko.askSelection", "title": "Спросить Айко про выделенный код", "category": "Айко" },
       { "command": "aiko.explainFile", "title": "Попросить Айко объяснить этот файл", "category": "Айко" },
-      { "command": "aiko.reload", "title": "Переподключиться к Айко", "category": "Айко" }
+      { "command": "aiko.reload", "title": "Переподключиться к Айко", "category": "Айко" },
+      { "command": "aiko.clearAnnotations", "title": "Убрать замечания Айко", "category": "Айко" }
     ],
     "menus": {
       "editor/context": [

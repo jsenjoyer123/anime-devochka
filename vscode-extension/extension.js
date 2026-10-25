@@ -1,12 +1,20 @@
 // Расширение VS Code: Айко в боковой панели (страница server.py во фрейме),
 // команды, которые отправляют ей выделенный код или текущий файл,
-// и живой контекст: какой файл открыт и что выделено — чтобы она понимала «вот это».
+// живой контекст: какой файл открыт и что выделено — чтобы она понимала «вот это»,
+// и замечания её ревью — подчёркиваниями прямо в редакторе.
 const http = require("http");
+const nodePath = require("path");
 const vscode = require("vscode");
 
 const MAX_CHARS = 15000; // столько кода за раз ей хватит, больше — только тратить токены
 const MAX_CONTEXT_CHARS = 4000; // выделение для контекста — серверу больше и не нужно
 const CONTEXT_DEBOUNCE_MS = 800;
+const ANNOTATIONS_POLL_MS = 4000;
+const SEVERITY = {
+  error: vscode.DiagnosticSeverity.Error,
+  warning: vscode.DiagnosticSeverity.Warning,
+  info: vscode.DiagnosticSeverity.Information,
+};
 
 /** @type {vscode.WebviewView | undefined} */
 let view;
@@ -47,10 +55,10 @@ async function send(message) {
   view?.webview.postMessage({ type: "aiko-ask", ...message });
 }
 
-/** Сообщаем серверу, что сейчас на экране у семпая. Сервер не запущен — молча пропускаем. */
-function postContext(body) {
+/** POST к серверу Айко. Сервер не запущен — молча пропускаем. */
+function post(path, body) {
   let url;
-  try { url = new URL("/api/context", serverUrl()); } catch { return; }
+  try { url = new URL(path, serverUrl()); } catch { return; }
   const data = JSON.stringify(body);
   const req = http.request(url, {
     method: "POST",
@@ -60,6 +68,45 @@ function postContext(body) {
   req.on("error", () => {});
   req.on("timeout", () => req.destroy());
   req.end(data);
+}
+
+/** GET JSON с сервера; null — сервер не отвечает. */
+function getJson(path) {
+  return new Promise((resolve) => {
+    let url;
+    try { url = new URL(path, serverUrl()); } catch { return resolve(null); }
+    const req = http.get(url, { timeout: 3000 }, (res) => {
+      let raw = "";
+      res.setEncoding("utf8");
+      res.on("data", (c) => { raw += c; });
+      res.on("end", () => {
+        try { resolve(res.statusCode === 200 ? JSON.parse(raw) : null); } catch { resolve(null); }
+      });
+    });
+    req.on("error", () => resolve(null));
+    req.on("timeout", () => req.destroy());
+  });
+}
+
+// замечания ревью: сервер хранит последний набор с номером версии, мы забираем его при изменении
+const diagnostics = vscode.languages.createDiagnosticCollection("aiko");
+let annotationsKey = "";
+async function pullAnnotations() {
+  const data = await getJson("/api/annotations");
+  if (!data) return;
+  const key = `${data.root}#${data.version}`;
+  if (key === annotationsKey) return;
+  annotationsKey = key;
+  diagnostics.clear();
+  const byFile = new Map();
+  for (const n of data.notes || []) {
+    const d = new vscode.Diagnostic(new vscode.Range(n.line - 1, 0, n.line - 1, 1000), n.message,
+      SEVERITY[n.severity] ?? vscode.DiagnosticSeverity.Warning);
+    d.source = "Айко-тян";
+    const file = nodePath.join(data.root, n.path);
+    byFile.set(file, [...(byFile.get(file) || []), d]);
+  }
+  for (const [file, list] of byFile) diagnostics.set(vscode.Uri.file(file), list);
 }
 
 let contextTimer;
@@ -83,7 +130,7 @@ function shareEditor() {
     if (key === lastContext && Date.now() - lastSentAt < CONTEXT_RESEND_MS) return;
     lastContext = key;
     lastSentAt = Date.now();
-    postContext(body);
+    post("/api/context", body);
   }, CONTEXT_DEBOUNCE_MS);
 }
 
@@ -135,11 +182,20 @@ function activate(context) {
       shareEditor();
     }),
 
+    vscode.commands.registerCommand("aiko.clearAnnotations", () => {
+      diagnostics.clear();
+      post("/api/annotations", { clear: true });
+    }),
+
+    diagnostics,
     vscode.window.onDidChangeActiveTextEditor(shareEditor),
     vscode.window.onDidChangeTextEditorSelection(shareEditor),
     { dispose: () => clearTimeout(contextTimer) },
   );
   shareEditor();
+  pullAnnotations();
+  const poll = setInterval(pullAnnotations, ANNOTATIONS_POLL_MS);
+  context.subscriptions.push({ dispose: () => clearInterval(poll) });
 }
 
 function deactivate() {}
