@@ -175,6 +175,15 @@ const state = {
 
 const motion = new Motion();
 
+// настроение: копится от поглаживаний, тычков и слов семпая, медленно возвращается к нулю
+let mood = Number(localStorage.getItem("aiko-mood")) || 0;
+function shiftMood(delta) {
+  mood = Math.max(-1, Math.min(1, mood + delta));
+  localStorage.setItem("aiko-mood", mood.toFixed(2));
+  $("mood").textContent = mood > 0.5 ? "🥰" : mood > 0.15 ? "😊" : mood < -0.5 ? "😤" : mood < -0.15 ? "😒" : "😐";
+}
+const baseEmotion = () => (mood > 0.4 ? "relaxed" : mood < -0.4 ? "sad" : "neutral");
+
 /** Переодеться: с кружением, новый образ надевается, когда она стоит спиной. */
 function changeOutfit(next, animated = true) {
   outfit = next;
@@ -438,7 +447,11 @@ async function playNext(token) {
   playing = Boolean(item);
   if (!item) {
     state.talking = false;
-    setTimeout(() => { if (!state.talking) subtitles.textContent = ""; }, 2500);
+    setTimeout(() => {
+      if (state.talking) return;
+      subtitles.textContent = "";
+      if (!state.thinking && !state.sleeping) state.emotion = baseEmotion();
+    }, 2500);
     return;
   }
   if (item.emotion) state.emotion = item.emotion;
@@ -609,7 +622,7 @@ async function ask(payload) {
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ ...payload, mood }),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
@@ -682,6 +695,7 @@ $("form").addEventListener("submit", (e) => {
   if (!text || sendBtn.disabled) return;
   input.value = "";
   addMessage("user", text);
+  reactToWords(text);
   ask({ message: text });
 });
 
@@ -731,6 +745,7 @@ const ear = new Ear({
       if (error) throw new Error(error);
       if (!text || sendBtn.disabled) return;
       addMessage("user", `🎤 ${text}`);
+      reactToWords(text);
       ask({ message: text });
     } catch (e) {
       addMessage("error", `Не расслышала: ${e.message}`);
@@ -849,12 +864,14 @@ canvas.addEventListener("pointerdown", (e) => {
   lastPoke = now;
   const headY = vrm.humanoid.getNormalizedBoneNode("neck").getWorldPosition(new THREE.Vector3()).y;
   if (hit.point.y > headY + 0.04) {
+    shiftMood(0.12);
     state.emotion = "happy";
     state.eyesClosedUntil = now + 2200;
     state.tilt = 0.15;
     setTimeout(() => { state.tilt = 0; }, 2200);
     quip(pick(["[happy] Э-хе-хе...", "[happy] [shy] Ну семпай, не при всех же...", "[relaxed] Мур... ещё чуть-чуть.", "[happy] Хи-хи, щекотно!"]));
   } else {
+    shiftMood(-0.15);
     state.emotion = "surprised";
     quip(pick(["[surprised] Ай!", "[angry] [shake] Эй! Руки, семпай!", "[surprised] Чего тыкаешь?", "[angry] Я вообще-то работаю!"]));
   }
@@ -901,6 +918,7 @@ setInterval(() => {
     fallAsleep();
   } else if (idleFor > BORED_AFTER_MS && !boredSpoken && !sendBtn.disabled) {
     boredSpoken = true;
+    shiftMood(-0.05);
     ask({ action: "idle" });
   } else if (Math.random() < 0.35) {
     // мелкие движения, чтобы не стояла статуей
@@ -940,6 +958,52 @@ function decorateSeason(d = new Date()) {
       : `left:${Math.random() * 100}%;--size:${12 + Math.random() * 14}px;--dur:${dur}s;--delay:${-Math.random() * dur}s;--drift:${(Math.random() - 0.5) * 160}px`;
     box.append(s);
   }
+}
+
+/** Похвала и грубость влияют на настроение (а модель узнаёт о нём из mood). */
+function reactToWords(text) {
+  if (/молодец|умниц|спасибо|класс|супер|обожаю|люблю|хорошая|лучшая|thank/i.test(text)) shiftMood(0.1);
+  if (/дура|тупая|глупая|бесишь|заткнись|отстань|бесполезн/i.test(text)) shiftMood(-0.3);
+}
+
+// настроение само остывает к нулю: примерно на 0.05 каждые 10 минут
+setInterval(() => { if (Math.abs(mood) > 0.01) shiftMood(-Math.sign(mood) * 0.05); }, 600_000);
+shiftMood(0);
+
+// переключение проектов: список недавних + любая папка; после смены — перезагрузка страницы
+const projectMenu = $("project-menu");
+$("projects").onclick = async () => {
+  if (!projectMenu.hidden) { projectMenu.hidden = true; return; }
+  const s = await (await fetch("/api/status")).json();
+  projectMenu.replaceChildren();
+  for (const path of s.recent) {
+    const b = Object.assign(document.createElement("button"), { textContent: `📁 ${path}`, title: path });
+    if (path === s.path) b.className = "current";
+    b.onclick = () => switchProject(path);
+    projectMenu.append(b);
+  }
+  const other = Object.assign(document.createElement("button"), { textContent: "➕ Другая папка…" });
+  other.onclick = () => {
+    const path = prompt("Путь к проекту:", s.path);
+    if (path) switchProject(path);
+  };
+  projectMenu.append(other);
+  projectMenu.hidden = false;
+};
+
+async function switchProject(path) {
+  projectMenu.hidden = true;
+  const res = await fetch("/api/project", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    addMessage("error", data.error);
+    return;
+  }
+  location.reload(); // новая модель, образ и заметки — проще и чище начать страницу заново
 }
 
 decorateSeason();

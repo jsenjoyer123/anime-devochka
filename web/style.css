@@ -301,3 +301,32 @@ button.on { background: #e2336b; color: #fff; }
   100% { transform: translate(110vw, 4vh); }
 }
 #stage.paused #season span { animation-play-state: paused; }
+
+/* ---------- переключатель проектов и настроение ---------- */
+#panel header { position: relative; }
+.controls { display: flex; align-items: center; gap: 6px; }
+#mood { font-size: 20px; cursor: default; }
+#project-menu {
+  position: absolute;
+  top: 100%;
+  right: 12px;
+  z-index: 5;
+  width: 320px;
+  padding: 6px;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(120, 60, 120, .25);
+}
+#project-menu[hidden] { display: none; }
+#project-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#project-menu button:hover { background: #ffe1ef; }
+#project-menu button.current { font-weight: 800; }

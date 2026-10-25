@@ -32,6 +32,10 @@ except ImportError:
 HERE = Path(__file__).resolve().parent
 WEB_DIR = HERE / "web"
 NOTES_DIR = HERE / "notes"
+SENPAI_PATH = NOTES_DIR / "_senpai.md"      # что Айко помнит о семпае — общее для всех проектов
+RECENT_PATH = NOTES_DIR / "_projects.json"  # недавние проекты для переключателя
+MAX_SENPAI_LINES = 60
+MAX_RECENT = 10
 
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "deepseek/deepseek-v4.1-flash-1017"
@@ -92,6 +96,9 @@ Cargo.toml, Makefile, Dockerfile...) → README → точки входа → я
 схемы — через show_diagram (Mermaid). История проекта — git_log, git_show, git_blame, \
 git_hotspots, git_diff. Команды (тесты, сборку, линтер) запускай через run_command — \
 семпай сначала подтвердит; ничего разрушительного не предлагай.
+
+Запоминай важное о семпае инструментом remember: имя, роль, стек, что любит и не любит, \
+о чём договорились. Это общая память на все проекты — не записывай туда код и секреты.
 
 Ты умеешь переодеваться инструментом set_outfit. Образ отражает проект: его язык, \
 стек и настроение (цвета экосистемы, подходящий аксессуар, значок на груди). \
@@ -197,6 +204,11 @@ TOOLS = [
         }, "required": ["name", "top_color", "accessory", "badge_text"]},
     }},
     {"type": "function", "function": {
+        "name": "remember",
+        "description": "Запомнить факт о семпае или вашей договорённости (одна строка). Помнится во всех проектах.",
+        "parameters": {"type": "object", "properties": {"fact": {"type": "string"}}, "required": ["fact"]},
+    }},
+    {"type": "function", "function": {
         "name": "git_log",
         "description": "История коммитов (вся или по файлу).",
         "parameters": {"type": "object", "properties": {
@@ -270,6 +282,19 @@ MAX_SHOW_LINES = 60
 CONFIRM_TIMEOUT = 300  # сколько ждём, пока семпай нажмёт «разрешить»
 
 HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def mood_hint(mood: float) -> str:
+    """Настроение копится в браузере от поглаживаний, тычков и похвалы — модель играет его."""
+    if mood > 0.5:
+        return "Настроение: отличное, ты обожаешь семпая сегодня — больше тепла и радости.\n"
+    if mood > 0.15:
+        return "Настроение: хорошее.\n"
+    if mood < -0.5:
+        return "Настроение: обиженное — отвечай по делу, но с лёгкой надутостью, можно припомнить обиду.\n"
+    if mood < -0.15:
+        return "Настроение: немного не в духе.\n"
+    return ""
 
 
 def season_hint(today: datetime.date | None = None) -> str:
@@ -454,6 +479,16 @@ class Workspace:
         except (OSError, json.JSONDecodeError):
             return None
 
+    def remember(self, fact: str) -> str:
+        fact = " ".join(str(fact).split())[:300]
+        if not fact:
+            return "Нечего запоминать."
+        lines = SENPAI_PATH.read_text(encoding="utf-8").splitlines() if SENPAI_PATH.is_file() else []
+        lines.append(f"- {datetime.date.today():%d.%m.%Y}: {fact}")
+        SENPAI_PATH.parent.mkdir(parents=True, exist_ok=True)
+        SENPAI_PATH.write_text("\n".join(lines[-MAX_SENPAI_LINES:]) + "\n", encoding="utf-8")
+        return "Запомнила."
+
     def write_onboarding_doc(self, content: str) -> str:
         self.onboarding_path.parent.mkdir(parents=True, exist_ok=True)
         self.onboarding_path.write_text(content, encoding="utf-8")
@@ -495,7 +530,7 @@ class Workspace:
     def call(self, name: str, args: dict) -> str:
         fn = {"list_dir": self.list_dir, "read_file": self.read_file, "search": self.search,
               "write_notes": self.write_notes, "set_outfit": self.set_outfit,
-              "write_onboarding_doc": self.write_onboarding_doc,
+              "write_onboarding_doc": self.write_onboarding_doc, "remember": self.remember,
               "git_log": self.git_log, "git_show": self.git_show, "git_blame": self.git_blame,
               "git_hotspots": self.git_hotspots, "git_diff": self.git_diff}.get(name)
         if fn is None:
@@ -526,6 +561,8 @@ def describe_call(name: str, args: dict) -> str:
         return "рисую схему ✏"
     if name == "write_onboarding_doc":
         return "пишу ONBOARDING.md ✎"
+    if name == "remember":
+        return "запоминаю про семпая ♡"
     if name == "run_command":
         return f"хочу запустить: {args.get('command')}"
     return name
@@ -539,10 +576,14 @@ class Agent:
         self.history: list = []
         self.lock = threading.Lock()  # один ответ за раз
         self.pending: dict[str, dict] = {}  # запросы на запуск команд: id → {event, approved}
+        self.mood = 0.0  # -1 обижена … +1 счастлива; присылает браузер
 
     def system_prompt(self) -> str:
         s = PERSONA + f"\nКорень проекта: {self.ws.root.name} (все пути относительно него).\n"
         s += f"Сегодня {datetime.date.today():%d.%m.%Y}{season_hint()}.\n"
+        s += mood_hint(self.mood)
+        if SENPAI_PATH.is_file():
+            s += "\nЧто ты помнишь о семпае:\n" + SENPAI_PATH.read_text(encoding="utf-8")
         if self.ws.notes_path.is_file():
             s += "\nТвои заметки с онбординга:\n\n" + self.ws.notes_path.read_text(encoding="utf-8")
         return s
@@ -695,7 +736,38 @@ class Agent:
         return True
 
 
-AGENT: Agent | None = None
+AGENT: Agent | None = None             # текущий проект
+AGENTS: dict[Path, Agent] = {}          # открытые проекты: история диалога сохраняется при переключении
+SWITCH_LOCK = threading.Lock()
+API_KEY = ""
+MODEL = ""
+
+
+def open_project(root: Path) -> Agent:
+    """Сделать проект текущим (агента создаём один раз и держим в кэше)."""
+    global AGENT
+    with SWITCH_LOCK:
+        if AGENT is not None and AGENT.lock.locked():
+            raise RuntimeError("Айко сейчас занята ответом — переключимся, когда договорит")
+        agent = AGENTS.get(root)
+        if agent is None:
+            agent = AGENTS[root] = Agent(Workspace(root, NOTES_DIR / f"{root.name}.md"), API_KEY, MODEL)
+        AGENT = agent
+        remember_recent(root)
+        return agent
+
+
+def recent_projects() -> list[str]:
+    try:
+        return [p for p in json.loads(RECENT_PATH.read_text(encoding="utf-8")) if Path(p).is_dir()]
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def remember_recent(root: Path) -> None:
+    items = [str(root)] + [p for p in recent_projects() if p != str(root)]
+    RECENT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    RECENT_PATH.write_text(json.dumps(items[:MAX_RECENT], ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def project_model_url(project: str) -> str | None:
@@ -768,23 +840,26 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
+        agent = AGENT
         if self.path == "/api/status":
             return self._json(200, {
-                "project": AGENT.ws.root.name,
-                "model": AGENT.model,
-                "has_notes": AGENT.has_notes(),
+                "project": agent.ws.root.name,
+                "path": str(agent.ws.root),
+                "recent": recent_projects(),
+                "model": agent.model,
+                "has_notes": agent.has_notes(),
                 "tts": edge_tts is not None,
-                "outfit": AGENT.ws.outfit(),
-                "has_doc": AGENT.ws.onboarding_path.is_file(),
-                "model_url": project_model_url(AGENT.ws.root.name),
+                "outfit": agent.ws.outfit(),
+                "has_doc": agent.ws.onboarding_path.is_file(),
+                "model_url": project_model_url(agent.ws.root.name),
             })
         if self.path == "/api/onboarding":
-            return self._onboarding()
+            return self._onboarding(agent)
         return super().do_GET()
 
-    def _onboarding(self) -> None:
+    def _onboarding(self, agent: "Agent") -> None:
         try:
-            data = AGENT.ws.onboarding_path.read_bytes()
+            data = agent.ws.onboarding_path.read_bytes()
         except OSError:
             return self._json(404, {"error": "ONBOARDING.md ещё не написан"})
         self.send_response(200)
@@ -808,7 +883,7 @@ class Handler(SimpleHTTPRequestHandler):
         return ctype.startswith("application/json") or ctype == "audio/wav"
 
     def do_POST(self):
-        if self.path not in ("/api/chat", "/api/tts", "/api/confirm", "/api/stt"):
+        if self.path not in ("/api/chat", "/api/tts", "/api/confirm", "/api/stt", "/api/project"):
             return self._json(404, {"error": "not found"})
         if not self._same_origin():
             return self._json(403, {"error": "forbidden"})
@@ -824,16 +899,30 @@ class Handler(SimpleHTTPRequestHandler):
 
         if self.path == "/api/tts":
             return self._tts(str(body.get("text", ""))[:MAX_TTS_CHARS].strip())
+        agent = AGENT  # берём один раз: проект могут переключить посреди запроса
         if self.path == "/api/confirm":
-            ok = AGENT.resolve_confirm(str(body.get("id", "")), body.get("approve") is True)
+            ok = agent.resolve_confirm(str(body.get("id", "")), body.get("approve") is True)
             return self._json(200 if ok else 404, {"ok": ok})
+        if self.path == "/api/project":
+            root = Path(str(body.get("path", ""))).expanduser().resolve()
+            if not root.is_dir():
+                return self._json(400, {"error": f"Не вижу такой папки: {root}"})
+            try:
+                open_project(root)
+            except RuntimeError as e:
+                return self._json(409, {"error": str(e)})
+            return self._json(200, {"ok": True, "project": root.name})
 
         actions = {"learn": LEARN_TASK, "idle": IDLE_TASK, "tour": TOUR_TASK,
                    "review": REVIEW_TASK, "doc": DOC_TASK}
         text = actions.get(body.get("action")) or str(body.get("message", "")).strip()
         if not text:
             return self._json(400, {"error": "пустое сообщение"})
-        if not AGENT.lock.acquire(blocking=False):
+        try:
+            agent.mood = max(-1.0, min(1.0, float(body.get("mood") or 0)))
+        except (TypeError, ValueError):
+            agent.mood = 0.0
+        if not agent.lock.acquire(blocking=False):
             return self._json(409, {"error": "Айко ещё думает над прошлым вопросом"})
 
         # ответ стримим построчно (NDJSON), чтобы аватар реагировал на каждый шаг
@@ -847,7 +936,7 @@ class Handler(SimpleHTTPRequestHandler):
             self.wfile.flush()
 
         try:
-            AGENT.run(text, emit)
+            agent.run(text, emit)
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as e:
@@ -856,7 +945,7 @@ class Handler(SimpleHTTPRequestHandler):
             except OSError:
                 pass
         finally:
-            AGENT.lock.release()
+            agent.lock.release()
 
     def _stt(self, length: int) -> None:
         if self.headers.get("Content-Type") != "audio/wav":
@@ -864,7 +953,7 @@ class Handler(SimpleHTTPRequestHandler):
         if not 0 < length <= MAX_AUDIO_BYTES:
             return self._json(413, {"error": "слишком длинная запись"})
         try:
-            text = transcribe(self.rfile.read(length), AGENT.api_key)
+            text = transcribe(self.rfile.read(length), API_KEY)
         except Exception as e:
             return self._json(502, {"error": f"STT: {e}"})
         return self._json(200, {"text": text})
@@ -886,7 +975,7 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 def main() -> int:
-    global AGENT
+    global API_KEY, MODEL
     parser = argparse.ArgumentParser(description="Айко-тян онбордится в твой проект")
     parser.add_argument("project", help="Путь к проекту, который нужно изучить")
     parser.add_argument("--port", type=int, default=8765)
@@ -903,8 +992,9 @@ def main() -> int:
         print(f"Не вижу такой папки: {root}")
         return 1
 
-    model = args.model or os.environ.get("OPENROUTER_MODEL") or DEFAULT_MODEL
-    AGENT = Agent(Workspace(root, NOTES_DIR / f"{root.name}.md"), api_key, model)
+    API_KEY = api_key
+    MODEL = model = args.model or os.environ.get("OPENROUTER_MODEL") or DEFAULT_MODEL
+    open_project(root)
 
     # слушаем только localhost: наружу проект не светим
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
