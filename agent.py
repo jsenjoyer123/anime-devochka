@@ -458,6 +458,9 @@ class Agent:
         if allowed := self.ws.allowed_commands():
             s += ("\nЭти команды семпай разрешил запускать без подтверждения (строго в таком виде): "
                   + "; ".join(f"`{c}`" for c in allowed) + ". Если подходит — используй их.\n")
+        if stale := self.ws.notes_staleness():
+            s += (f"\nТвои заметки устарели: после них в проекте уже {stale} коммитов. Если к месту — "
+                  "предложи семпаю нажать «Переизучить проект» (не чаще раза за разговор).\n")
         if self.ws.notes_path.is_file():
             s += "\nТвои заметки с онбординга:\n\n" + self.ws.notes_path.read_text(encoding="utf-8")
         return s

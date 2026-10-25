@@ -252,6 +252,8 @@ button.on { background: #e2336b; color: #fff; }
 .msg .ask button { font-size: 12px; padding: 5px 10px; }
 .msg .ask .yes { background: #b8f0c8; }
 .msg .ask .no { background: #ffd0d0; }
+#learn.stale { animation: stale-pulse 2.4s ease-in-out infinite; }
+@keyframes stale-pulse { 50% { filter: brightness(1.12); box-shadow: 0 0 0 4px rgba(255, 143, 199, .35); } }
 #spent { font-size: 12px; opacity: .75; white-space: nowrap; }
 #spent[hidden] { display: none; }
 #project-menu .allowed { border-top: 1px solid #f0c3d8; margin-top: 4px; padding-top: 4px; }

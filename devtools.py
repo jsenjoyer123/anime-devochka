@@ -117,6 +117,12 @@ def changes(root: Path) -> dict:
     return {"git": True, "sig": sig, "files": files[:50], "head": head(root)}
 
 
+def commits_since(root: Path, timestamp: float) -> int:
+    """Сколько коммитов появилось после момента timestamp (unix-время); 0, если не git."""
+    out = _git(root, "rev-list", "--count", f"--since={int(timestamp)}", "HEAD")
+    return int(out) if out.isdigit() else 0
+
+
 def head(root: Path) -> str:
     """Хеш текущего коммита; пусто, если коммитов ещё нет."""
     out = _git(root, "rev-parse", "--verify", "-q", "HEAD")

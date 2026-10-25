@@ -123,6 +123,7 @@ class Handler(SimpleHTTPRequestHandler):
                 "recent": recent_projects(),
                 "model": agent.model,
                 "has_notes": agent.has_notes(),
+                "stale_commits": agent.ws.notes_staleness(),
                 "tts": edge_tts is not None,
                 "outfit": agent.ws.outfit(),
                 "has_doc": agent.ws.onboarding_path.is_file(),

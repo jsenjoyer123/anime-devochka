@@ -21,6 +21,7 @@ USAGE_PATH = NOTES_DIR / "_usage.json"      # расходы OpenRouter по д�
 MAX_SENPAI_LINES = 60
 MAX_PROJECT_MEMORY_LINES = 60
 MAX_ALLOWED_COMMANDS = 30
+STALE_AFTER_COMMITS = 25  # столько коммитов после заметок — пора переизучить проект
 MAX_RECENT = 10
 
 MAX_READ_CHARS = 20_000     # символов файла за одно чтение
@@ -227,6 +228,15 @@ class Workspace:
 
     def remember_project(self, fact: str) -> str:
         return self._append_fact(self.memory_path, fact, MAX_PROJECT_MEMORY_LINES)
+
+    def notes_staleness(self) -> int:
+        """Сколько коммитов прошло с последнего изучения; 0 — заметок нет или они свежие."""
+        try:
+            written = self.notes_path.stat().st_mtime
+        except OSError:
+            return 0
+        n = devtools.commits_since(self.root, written)
+        return n if n >= STALE_AFTER_COMMITS else 0
 
     def project_memory(self) -> str:
         return self.memory_path.read_text(encoding="utf-8") if self.memory_path.is_file() else ""

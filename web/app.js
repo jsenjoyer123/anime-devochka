@@ -960,13 +960,17 @@ async function refreshStatus() {
     projectModelUrl = s.model_url;
     if (s.outfit && !outfit) changeOutfit(s.outfit, false);
     learnBtn.hidden = false;
-    learnBtn.textContent = s.has_notes ? "🔄 Переизучить проект" : "✨ Изучить проект";
+    learnBtn.textContent = !s.has_notes ? "✨ Изучить проект"
+      : s.stale_commits ? `🔄 Переизучить проект (+${s.stale_commits} коммитов)` : "🔄 Переизучить проект";
+    learnBtn.classList.toggle("stale", Boolean(s.stale_commits));
     renderQuest(s.quest);
     if (!greeted) {
       greeted = true;
       // чат с прошлого раза: сервер помнит последние реплики
       for (const m of s.transcript || []) addMessage(m.role === "user" ? "user" : "aiko", stripTags(m.content));
-      const hello = s.has_notes
+      const hello = s.has_notes && s.stale_commits
+        ? `[happy] [wave] С возвращением, семпай! [surprised] Ого, в ${s.project} уже ${s.stale_commits} новых коммитов с тех пор, как я его изучала. Нажми «Переизучить», и я догоню!`
+        : s.has_notes
         ? `[happy] [wave] С возвращением, семпай! Я помню проект ${s.project} по своим заметкам. Спрашивай что угодно!`
         : `[happy] [wave] Привет, семпай! Я Айко, твоя новая коллега. [surprised] Проект ${s.project} я ещё не видела — нажми «Изучить проект», и я всё-всё разберу!`;
       addMessage("aiko", stripTags(hello));

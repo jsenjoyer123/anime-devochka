@@ -5,11 +5,13 @@
 """
 
 import json
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -481,6 +483,25 @@ class DiffTest(Base):
         self.assertEqual(diff["title"], "diff · staged")
         self.assertEqual(len(diff["diff"].splitlines()), devtools.MAX_DIFF_LINES + 1)
         self.assertIn("сузь до файла", diff["diff"])
+
+
+class StaleNotesTest(Base):
+    def test_notes_go_stale_after_many_commits(self):
+        self.assertEqual(self.ws.notes_staleness(), 0)  # заметок нет
+        self.ws.write_notes("# заметки")
+        os.utime(self.ws.notes_path, (1_000_000_000, 1_000_000_000))  # «изучала» в 2001 году
+        git = ["git", "-C", str(self.root), "-c", "user.name=t", "-c", "user.email=t@t"]
+        for i in range(workspace.STALE_AFTER_COMMITS - 2):
+            subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", f"c{i}"], check=True)
+        self.assertEqual(self.ws.notes_staleness(), 0)  # 24 коммита с init — ещё терпимо
+        subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "last"], check=True)
+        self.assertEqual(self.ws.notes_staleness(), workspace.STALE_AFTER_COMMITS)
+        agent = agent_mod.Agent(self.ws, "key", "model")
+        self.assertIn("заметки устарели", agent.system_prompt())
+        self.ws.write_notes("# свежие")
+        later = time.time() + 60  # git сравнивает до секунды, а коммиты теста — в ту же секунду
+        os.utime(self.ws.notes_path, (later, later))
+        self.assertEqual(self.ws.notes_staleness(), 0)
 
 
 class ProjectMemoryAndEditorTest(Base):
