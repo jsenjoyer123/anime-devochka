@@ -182,6 +182,23 @@ function buildAccessory(kind, h, color) {
       }
       break;
     }
+    case "witch_hat": {
+      const mat = toon(color);
+      const y = h.top - R * 0.55;
+      add(new THREE.CylinderGeometry(R * 1.5, R * 1.5, 0.008, 32), mat, 0, y, h.centerZ, 0.08, 0, 0);
+      // конус чуть заломлен назад, как у настоящей ведьмы
+      add(new THREE.ConeGeometry(R * 0.78, R * 1.7, 24), mat, 0, y + R * 0.82, h.centerZ - R * 0.12, -0.22, 0, 0.12);
+      add(new THREE.CylinderGeometry(R * 0.8, R * 0.82, R * 0.16, 24), toon(new THREE.Color("#ffb347")), 0, y + R * 0.1, h.centerZ);
+      break;
+    }
+    case "santa_hat": {
+      const white = toon(new THREE.Color("#ffffff"));
+      const y = h.top - R * 0.5;
+      add(new THREE.ConeGeometry(R * 0.98, R * 1.3, 24), toon(color), 0, y + R * 0.6, h.centerZ - R * 0.15, -0.45, 0, 0);
+      add(new THREE.TorusGeometry(R * 0.98, R * 0.13, 10, 28), white, 0, y, h.centerZ, Math.PI / 2 - 0.08, 0, 0);
+      add(new THREE.SphereGeometry(R * 0.17, 12, 8), white, 0, y + R * 1.1, h.centerZ - R * 0.75);
+      break;
+    }
     default:
       return null;
   }

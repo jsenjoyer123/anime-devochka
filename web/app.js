@@ -117,8 +117,10 @@ async function loadVRM(url) {
   camera.lookAt(cameraTarget);
 }
 
+let projectModelUrl = null; // своя модель для проекта: web/models/projects/<проект>.vrm
+
 async function loadDefaultModel() {
-  for (const url of MODEL_URLS) {
+  for (const url of [projectModelUrl, ...MODEL_URLS].filter(Boolean)) {
     try {
       await loadVRM(url);
       $("loading").hidden = true;
@@ -177,6 +179,7 @@ const motion = new Motion();
 function changeOutfit(next, animated = true) {
   outfit = next;
   $("outfit-name").textContent = next ? `· ${next.name}` : "";
+  stage.dataset.bg = next?.background || "sakura";
   if (!vrm) return; // наденем сразу после загрузки модели
   if (!animated) {
     applyOutfit(vrm, outfit);
@@ -185,7 +188,7 @@ function changeOutfit(next, animated = true) {
   state.spin = 0;
   state.spinApplied = false;
 }
-window.aiko = { changeOutfit, play: (g) => motion.play(g) }; // поиграться из консоли браузера
+window.aiko = { changeOutfit, play: (g) => motion.play(g), get gesture() { return motion.current?.name ?? null; } }; // поиграться из консоли браузера
 
 function updateSpin(dt) {
   if (state.spin < 0) return;
@@ -759,6 +762,7 @@ async function refreshStatus() {
     const s = await (await fetch("/api/status")).json();
     $("meta").textContent = `${s.project} · ${s.model}`;
     serverTTS = s.tts;
+    projectModelUrl = s.model_url;
     if (s.outfit && !outfit) changeOutfit(s.outfit, false);
     learnBtn.hidden = false;
     learnBtn.textContent = s.has_notes ? "🔄 Переизучить проект" : "✨ Изучить проект";
@@ -799,6 +803,7 @@ function wakeUp() {
   boredSpoken = false;
   if (!state.sleeping) return;
   state.sleeping = false;
+  stage.classList.remove("paused");
   thinkingEl.hidden = true;
   state.emotion = "surprised";
   quip(pick([
@@ -811,6 +816,7 @@ function wakeUp() {
 function fallAsleep() {
   if (state.sleeping || state.thinking || state.talking) return;
   state.sleeping = true;
+  stage.classList.add("paused");
   state.emotion = "relaxed";
   thinkingEl.textContent = "💤 Zzz…";
   thinkingEl.hidden = false;
@@ -915,5 +921,27 @@ setInterval(() => {
   }
 }, 5000);
 
-loadDefaultModel();
-refreshStatus();
+// сезонные украшения: Хэллоуин — летучие мыши, Новый год — снег, весна — сакура
+function decorateSeason(d = new Date()) {
+  const md = (d.getMonth() + 1) * 100 + d.getDate();
+  const season = md >= 1020 && md <= 1101 ? { emoji: ["🦇", "🦇", "🎃"], cls: "bats", n: 7 }
+    : md >= 1215 || md <= 110 ? { emoji: ["❄", "❅", "❆"], cls: "", n: 16 }
+    : md >= 320 && md <= 430 ? { emoji: ["🌸", "🌸", "💮"], cls: "", n: 12 }
+    : null;
+  if (!season) return;
+  const box = $("season");
+  box.className = season.cls;
+  for (let i = 0; i < season.n; i++) {
+    const s = document.createElement("span");
+    s.textContent = pick(season.emoji);
+    const dur = 8 + Math.random() * 10;
+    s.style.cssText = season.cls === "bats"
+      ? `top:${5 + Math.random() * 55}%;--size:${20 + Math.random() * 16}px;--dur:${dur}s;--delay:${-Math.random() * dur}s`
+      : `left:${Math.random() * 100}%;--size:${12 + Math.random() * 14}px;--dur:${dur}s;--delay:${-Math.random() * dur}s;--drift:${(Math.random() - 0.5) * 160}px`;
+    box.append(s);
+  }
+}
+
+decorateSeason();
+// сначала узнаём, нет ли своей модели для проекта, потом грузим
+refreshStatus().finally(loadDefaultModel);

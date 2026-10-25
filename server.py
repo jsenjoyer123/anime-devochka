@@ -9,12 +9,14 @@
 import argparse
 import asyncio
 import base64
+import datetime
 import fnmatch
 import json
 import os
 import re
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -119,7 +121,9 @@ DOC_TASK = """Составь для новых людей в команде до
 к кому/куда идти с вопросами. Опирайся на заметки и проверяй факты инструментами. \
 Сохрани через write_onboarding_doc и коротко скажи семпаю, что готово."""
 
-ACCESSORIES = ["none", "glasses", "cap", "headphones", "cat_ears", "hard_hat", "beret", "bow"]
+ACCESSORIES = ["none", "glasses", "cap", "headphones", "cat_ears", "hard_hat", "beret", "bow",
+               "witch_hat", "santa_hat"]
+BACKGROUNDS = ["sakura", "terminal", "space", "cafe", "ocean", "sunset", "forest"]
 
 LEARN_TASK = """Семпай попросил тебя пройти онбординг в этот проект.
 
@@ -185,6 +189,9 @@ TOOLS = [
             "shoes_color": {"type": "string", "description": "Цвет обуви"},
             "accessory": {"type": "string", "enum": ACCESSORIES},
             "accessory_color": {"type": "string"},
+            "background": {"type": "string", "enum": BACKGROUNDS,
+                           "description": "Фон стрима: terminal — для бэкенда/CLI, space — для ML/данных, "
+                                          "cafe — уютный веб, ocean/forest/sunset — по настроению"},
             "badge_text": {"type": "string", "description": "Значок на груди: 1–3 символа, например PY, RS, JS, Go"},
             "badge_color": {"type": "string", "description": "Фон значка"},
         }, "required": ["name", "top_color", "accessory", "badge_text"]},
@@ -265,6 +272,19 @@ CONFIRM_TIMEOUT = 300  # сколько ждём, пока семпай нажм
 HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
+def season_hint(today: datetime.date | None = None) -> str:
+    """Подсказка модели про сезон: можно подобрать образ и пошутить к месту."""
+    d = today or datetime.date.today()
+    md = (d.month, d.day)
+    if (10, 20) <= md <= (11, 1):
+        return " — время Хэллоуина 🎃 (на сцене летают летучие мыши; можно надеть witch_hat)"
+    if md >= (12, 15) or md <= (1, 10):
+        return " — новогодние праздники ❄ (идёт снег; можно надеть santa_hat)"
+    if (3, 20) <= md <= (4, 30):
+        return " — весна, цветёт сакура 🌸"
+    return ""
+
+
 def clean_outfit(args: dict) -> dict:
     """Проверяем, что модель прислала, — во фронтенд уходят только безопасные значения."""
     def color(key: str, default: str) -> str:
@@ -272,6 +292,7 @@ def clean_outfit(args: dict) -> dict:
         return v if HEX_RE.match(v) else default
 
     accessory = args.get("accessory")
+    background = args.get("background")
     return {
         "name": str(args.get("name") or "Новый образ").strip()[:32],
         "top_color": color("top_color", "#ffffff"),
@@ -281,6 +302,7 @@ def clean_outfit(args: dict) -> dict:
         "accessory_color": color("accessory_color", "#ff8fc7"),
         "badge_text": str(args.get("badge_text") or "").strip()[:3],
         "badge_color": color("badge_color", "#e2336b"),
+        "background": background if background in BACKGROUNDS else "sakura",
     }
 
 
@@ -520,6 +542,7 @@ class Agent:
 
     def system_prompt(self) -> str:
         s = PERSONA + f"\nКорень проекта: {self.ws.root.name} (все пути относительно него).\n"
+        s += f"Сегодня {datetime.date.today():%d.%m.%Y}{season_hint()}.\n"
         if self.ws.notes_path.is_file():
             s += "\nТвои заметки с онбординга:\n\n" + self.ws.notes_path.read_text(encoding="utf-8")
         return s
@@ -675,6 +698,13 @@ class Agent:
 AGENT: Agent | None = None
 
 
+def project_model_url(project: str) -> str | None:
+    """Своя VRM-модель для проекта: web/models/projects/<проект>.vrm."""
+    if (WEB_DIR / "models" / "projects" / f"{project}.vrm").is_file():
+        return "models/projects/" + urllib.parse.quote(f"{project}.vrm")
+    return None
+
+
 def openrouter_request(body: bytes, api_key: str):
     req = urllib.request.Request(API_URL, data=body, headers={
         "Authorization": f"Bearer {api_key}",
@@ -746,6 +776,7 @@ class Handler(SimpleHTTPRequestHandler):
                 "tts": edge_tts is not None,
                 "outfit": AGENT.ws.outfit(),
                 "has_doc": AGENT.ws.onboarding_path.is_file(),
+                "model_url": project_model_url(AGENT.ws.root.name),
             })
         if self.path == "/api/onboarding":
             return self._onboarding()
