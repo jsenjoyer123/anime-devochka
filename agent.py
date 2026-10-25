@@ -60,7 +60,8 @@ git_hotspots, git_diff. Команды (тесты, сборку, линтер) 
 
 Ты помогаешь коммитить: посмотри git_diff (staged=true и без), придумай сообщение коммита \
 в стиле истории проекта (загляни в git_log) и вызови commit — семпай увидит сообщение, \
-сможет поправить и подтвердит. Push ты не делаешь никогда.
+сможет поправить и подтвердит. Push ты не делаешь никогда. Свой последний коммит, пока он \
+не запушен, можно отменить через undo_commit (изменения вернутся в индекс).
 
 У семпая есть онбординг-квест. Отмечай шаги инструментом complete_quest, только когда \
 шаг действительно сделан (экскурсия дошла до конца, команда прошла успешно, ответы на экзамене \
@@ -321,6 +322,12 @@ TOOLS = [
         }, "required": ["message"]},
     }},
     {"type": "function", "function": {
+        "name": "undo_commit",
+        "description": "Отменить твой последний коммит (git reset --soft HEAD~1), если он ещё не запушен. "
+                       "Изменения останутся в индексе. Семпай должен подтвердить.",
+        "parameters": {"type": "object", "properties": {}},
+    }},
+    {"type": "function", "function": {
         "name": "run_command",
         "description": "Выполнить shell-команду в корне проекта (тесты, сборка, линтер). "
                        "Семпай увидит команду и должен подтвердить. Таймаут 3 минуты.",
@@ -386,6 +393,8 @@ def describe_call(name: str, args: dict) -> str:
         return "записываю, как тут принято ✎"
     if name == "commit":
         return "готовлю коммит ✎"
+    if name == "undo_commit":
+        return "хочу отменить свой коммит ↶"
     if name.startswith("github_"):
         return "смотрю задачи на GitHub"
     if name == "complete_quest":
@@ -615,6 +624,8 @@ class Agent:
                 return self._run_confirmed(str(args["command"]), str(args.get("reason") or ""), emit)
             if name == "commit":
                 return self._commit_confirmed(str(args["message"]), args.get("add_all") is True, emit)
+            if name == "undo_commit":
+                return self._undo_confirmed(emit)
             if name == "set_reminder":
                 minutes = float(args["minutes"])
                 if not 1 <= minutes <= 480:
@@ -697,9 +708,31 @@ class Agent:
         emit({"type": "tool", "text": "коммичу ✎"})
         result = devtools.git_commit(self.ws.root, final, add_all)
         if result.startswith("Закоммитила"):
-            emit({"type": "committed", "head": devtools.head(self.ws.root)})
+            head = devtools.head(self.ws.root)
+            self.ws.set_own_commits(self.ws.own_commits() + [head])
+            emit({"type": "head", "head": head})
         if final != message:
             result += f"\n(семпай поправил сообщение на: {final})"
+        return result
+
+    def _undo_confirmed(self, emit) -> str:
+        """Отменяем только свой, последний и не запушенный коммит — и только с «да» семпая."""
+        head = devtools.head(self.ws.root)
+        if not head or head not in self.ws.own_commits():
+            return "Последний коммит делала не я — отменять чужие не буду."
+        if problem := devtools.undo_check(self.ws.root, head):
+            return problem
+        subject = devtools._git(self.ws.root, "log", "-1", "--format=%s")
+        answer = self._confirm({"kind": "undo", "commit": head[:8], "subject": subject[:200]}, emit)
+        if answer is None:
+            return "Семпай не ответил — коммит на месте."
+        if not answer["approved"]:
+            return "Семпай решил оставить коммит."
+        if problem := devtools.undo_check(self.ws.root, head):  # пока ждали, могли запушить
+            return problem
+        result = devtools.undo_commit(self.ws.root)
+        self.ws.set_own_commits([c for c in self.ws.own_commits() if c != head])
+        emit({"type": "head", "head": devtools.head(self.ws.root)})
         return result
 
     def resolve_confirm(self, rid: str, approved: bool, message: str | None = None, always: bool = False) -> bool:

@@ -615,7 +615,9 @@ function askConfirm(ev) {
   const more = commit && ev.files.length > 5 ? ` и ещё ${ev.files.length - 5}` : "";
   const div = addMessage("aiko", commit
     ? `Закоммитить ${ev.add_all ? "все изменения" : "то, что в индексе"}: ${ev.files.slice(0, 5).map((f) => `\`${f}\``).join(", ")}${more}? Сообщение можно поправить:`
-    : `Можно запущу \`${ev.command}\`?${ev.reason ? `\n${ev.reason}` : ""}`);
+    : ev.kind === "undo"
+      ? `Отменить мой коммит \`${ev.commit}\` «${ev.subject}»? Изменения вернутся в индекс, ничего не потеряется.`
+      : `Можно запущу \`${ev.command}\`?${ev.reason ? `\n${ev.reason}` : ""}`);
   // сообщение коммита семпай правит прямо здесь — уйдёт то, что в поле
   const text = commit ? Object.assign(document.createElement("textarea"), { className: "commit-msg", value: ev.message, rows: 3 }) : null;
   const row = document.createElement("div");
@@ -635,7 +637,7 @@ function askConfirm(ev) {
   yes.onclick = () => answer(true);
   no.onclick = () => answer(false);
   row.append(yes);
-  if (!commit) {
+  if (ev.kind === "run") {
     // точно такую же команду дальше она запускает без вопросов (только в этом проекте)
     const always = Object.assign(document.createElement("button"), { className: "yes", textContent: "Разрешать всегда", title: "Только эту команду, символ в символ, только в этом проекте" });
     always.onclick = () => answer(true, true);
@@ -647,7 +649,9 @@ function askConfirm(ev) {
   chat.scrollTop = chat.scrollHeight;
   quip(commit
     ? "[shy] Семпай, я придумала сообщение коммита. Глянешь и нажмёшь «Закоммитить»?"
-    : "[shy] Семпай, можно я кое-что запущу? Нажми «Разрешить» в чате.");
+    : ev.kind === "undo"
+      ? "[shy] Семпай, отменить мой коммит? Нажми «Разрешить» в чате."
+      : "[shy] Семпай, можно я кое-что запущу? Нажми «Разрешить» в чате.");
 }
 
 function setBusy(busy) {
@@ -771,8 +775,8 @@ function handleEvent(ev) {
   } else if (ev.type === "usage") {
     turnCost += ev.cost;
     showSpent(ev.today);
-  } else if (ev.type === "committed") {
-    lastHead = ev.head; // свой коммит она уже видела — реагировать на него не нужно
+  } else if (ev.type === "head") {
+    lastHead = ev.head; // HEAD сдвинула она сама (коммит или отмена) — реагировать не нужно
   } else if (ev.type === "reminder") {
     addReminder(ev.minutes, ev.text);
   } else if (ev.type === "quest") {

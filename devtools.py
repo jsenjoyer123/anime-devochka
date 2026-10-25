@@ -130,6 +130,24 @@ def staged_files(root: Path) -> list[str]:
     return out.splitlines()
 
 
+def undo_check(root: Path, rev: str) -> str | None:
+    """Почему нельзя отменить коммит rev (None — можно): он должен быть HEAD, не первым и не запушенным."""
+    if head(root) != rev:
+        return "Это уже не последний коммит — отменять опасно."
+    if not re.fullmatch(r"[0-9a-f]{40,64}", _git(root, "rev-parse", "--verify", "-q", "HEAD~1")):
+        return "Это первый коммит в репозитории — его не отменить."
+    if _git(root, "branch", "-r", "--contains", "HEAD") != "(пусто)":
+        return "Коммит уже запушен — отмена переписала бы общую историю."
+    return None
+
+
+def undo_commit(root: Path) -> str:
+    """git reset --soft HEAD~1: коммит исчезает, изменения остаются в индексе.
+    Вызывать ТОЛЬКО после подтверждения семпая и undo_check."""
+    out = _git(root, "reset", "--soft", "HEAD~1")
+    return f"Коммит отменён, изменения остались в индексе. Теперь HEAD — {head(root)[:8]}." if out == "(пусто)" else out
+
+
 def git_commit(root: Path, message: str, add_all: bool = False) -> str:
     """Коммит того, что в индексе (add_all — сначала git add -A). Без push.
     Вызывать ТОЛЬКО после подтверждения семпая."""

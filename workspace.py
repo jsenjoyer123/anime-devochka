@@ -79,6 +79,7 @@ class Workspace:
         # договорённости и поправки — отдельно от заметок: «Переизучить» перезаписывает заметки целиком
         self.memory_path = notes_path.with_suffix(".memory.md")
         self.allowed_path = notes_path.with_suffix(".allowed.json")  # команды «разрешать всегда»
+        self.commits_path = notes_path.with_suffix(".commits.json")  # её коммиты: отменять можно только их
         self.quest = Quest(notes_path.with_suffix(".quest.json"))
 
     def _resolve(self, rel: str) -> Path:
@@ -244,6 +245,17 @@ class Workspace:
         self.allowed_path.parent.mkdir(parents=True, exist_ok=True)
         self.allowed_path.write_text(json.dumps(items[-MAX_ALLOWED_COMMANDS:], ensure_ascii=False, indent=2),
                                      encoding="utf-8")
+
+    def own_commits(self) -> list[str]:
+        try:
+            items = json.loads(self.commits_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        return [c for c in items if isinstance(c, str)] if isinstance(items, list) else []
+
+    def set_own_commits(self, items: list[str]) -> None:
+        self.commits_path.parent.mkdir(parents=True, exist_ok=True)
+        self.commits_path.write_text(json.dumps(items[-20:], indent=1), encoding="utf-8")
 
     def write_onboarding_doc(self, content: str) -> str:
         self.onboarding_path.parent.mkdir(parents=True, exist_ok=True)

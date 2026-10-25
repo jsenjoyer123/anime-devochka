@@ -330,7 +330,9 @@ class ReminderAndWatchTest(Base):
         self.assertIn("new.py", second["files"])
 
 
-class CommitTest(Base):
+class GitUserBase(Base):
+    """Репозиторий с автором коммитов и незакоммиченной правкой в src/app.py."""
+
     def setUp(self):
         super().setUp()
         for key, value in (("user.name", "t"), ("user.email", "t@t")):
@@ -353,6 +355,8 @@ class CommitTest(Base):
         agent.run("закоммить", emit)
         return [m["content"] for m in agent.history if m["role"] == "tool"][0], events
 
+
+class CommitTest(GitUserBase):
     def test_nothing_staged_is_not_committed(self):
         result, events = self.run_commit(True, message="fix")
         self.assertIn("в индексе пусто", result)
@@ -366,7 +370,7 @@ class CommitTest(Base):
         self.assertIn("Закоммитила", result)
         head = devtools.head(self.root)
         self.assertNotEqual(head, before)
-        self.assertEqual(next(e for e in events if e["type"] == "committed")["head"], head)
+        self.assertEqual(next(e for e in events if e["type"] == "head")["head"], head)
         self.assertIn("#7 поправила ответ", devtools.git_log(self.root, max_count=1))
         self.assertEqual(devtools.changes(self.root)["head"], head)
 
@@ -376,6 +380,48 @@ class CommitTest(Base):
         result, _ = self.run_commit(False, message="fix")
         self.assertIn("отказался", result)
         self.assertEqual(devtools.head(self.root), before)
+
+
+class UndoCommitTest(GitUserBase):
+    def undo(self, approve=True):
+        agent = agent_mod.Agent(self.ws, "key", "model")
+        agent._llm = scripted(
+            {"role": "assistant", "content": None, "tool_calls": [tool_call("1", "undo_commit")]},
+            {"role": "assistant", "content": "ок"},
+        )
+        events = []
+
+        def emit(ev):
+            events.append(ev)
+            if ev["type"] == "confirm":
+                threading.Timer(0.05, agent.resolve_confirm, (ev["id"], approve)).start()
+
+        agent.run("отмени", emit)
+        return [m["content"] for m in agent.history if m["role"] == "tool"][0], events
+
+    def test_undo_own_commit(self):
+        before = devtools.head(self.root)
+        self.run_commit(True, message="oops", add_all=True)
+        result, events = self.undo()
+        self.assertIn("отменён", result)
+        self.assertEqual(next(e for e in events if e["type"] == "confirm")["subject"], "oops")
+        self.assertEqual(devtools.head(self.root), before)
+        self.assertEqual(devtools.staged_files(self.root), ["src/app.py"])  # правки не потерялись
+        self.assertEqual(next(e for e in events if e["type"] == "head")["head"], before)
+
+    def test_refuses_foreign_and_pushed(self):
+        result, events = self.undo()
+        self.assertIn("делала не я", result)
+        self.run_commit(True, message="mine", add_all=True)
+        remote = self.tmp / "remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+        git = ["git", "-C", str(self.root)]
+        subprocess.run([*git, "remote", "add", "origin", str(remote)], check=True)
+        subprocess.run([*git, "push", "-q", "origin", "HEAD:main"], check=True)
+        subprocess.run([*git, "fetch", "-q", "origin"], check=True)
+        result, events = self.undo()
+        self.assertIn("запушен", result)
+        self.assertFalse([e for e in events if e["type"] == "confirm"])
 
 
 class DiffTest(Base):

@@ -118,6 +118,17 @@ class UiTest(unittest.TestCase):
         self.page.wait_for_selector("text=коммитим")
         self.assertEqual(self.confirms[0]["message"], "fix: поправила привет")
 
+    def test_undo_confirm(self):
+        self.chat_replies({"type": "confirm", "id": "u1", "kind": "undo", "commit": "abc12345", "subject": "oops"},
+                          {"type": "reply", "text": "жду"})
+        self.open()
+        self.say("отмени коммит")
+        self.page.wait_for_selector("text=Отменить мой коммит abc12345 «oops»")
+        self.assertFalse(self.page.is_visible("text=Разрешать всегда"))
+        self.page.click(".ask .yes")
+        self.page.wait_for_selector("text=✅ разрешено")
+        self.assertEqual(self.confirms, [{"id": "u1", "approve": True, "always": False}])
+
     def test_diff_on_screen(self):
         self.chat_replies({"type": "diff", "title": "app.py · правки",
                            "diff": "diff --git a/app.py b/app.py\n@@ -1 +1 @@\n-print('hi')\n+print('привет')"},
