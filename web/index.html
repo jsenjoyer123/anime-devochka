@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>✿ Айко-тян ✿</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
+        "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3/lib/three-vrm.module.min.js"
+      }
+    }
+  </script>
+</head>
+<body>
+  <main id="stage">
+    <canvas id="scene"></canvas>
+    <div id="badge">✿ Айко-тян <span id="outfit-name"></span> <span id="live">● LIVE</span></div>
+    <div id="thinking" hidden></div>
+    <div id="subtitles"></div>
+    <div id="drop-hint">Перетащи сюда .vrm-модель, чтобы сменить облик</div>
+    <div id="loading">Айко-тян собирается на стрим…</div>
+  </main>
+
+  <aside id="panel">
+    <header>
+      <div>
+        <div class="title">Онбординг</div>
+        <div id="meta" class="meta">подключаюсь…</div>
+      </div>
+      <div class="controls">
+        <button id="mute" title="Голос вкл/выкл">🔊</button>
+      </div>
+    </header>
+    <div id="chat"></div>
+    <button id="learn" hidden>✨ Изучить проект</button>
+    <form id="form">
+      <button type="button" id="mic" title="Сказать голосом" hidden>🎤</button>
+      <input id="input" autocomplete="off" placeholder="Спроси что-нибудь о проекте, семпай…">
+      <button id="send">➤</button>
+    </form>
+  </aside>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
