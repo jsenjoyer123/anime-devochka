@@ -1,8 +1,12 @@
-// Расширение VS Code: Айко в боковой панели (страница server.py во фрейме)
-// и команды, которые отправляют ей выделенный код или текущий файл.
+// Расширение VS Code: Айко в боковой панели (страница server.py во фрейме),
+// команды, которые отправляют ей выделенный код или текущий файл,
+// и живой контекст: какой файл открыт и что выделено — чтобы она понимала «вот это».
+const http = require("http");
 const vscode = require("vscode");
 
 const MAX_CHARS = 15000; // столько кода за раз ей хватит, больше — только тратить токены
+const MAX_CONTEXT_CHARS = 4000; // выделение для контекста — серверу больше и не нужно
+const CONTEXT_DEBOUNCE_MS = 800;
 
 /** @type {vscode.WebviewView | undefined} */
 let view;
@@ -41,6 +45,46 @@ async function send(message) {
   }
   view?.show?.(true);
   view?.webview.postMessage({ type: "aiko-ask", ...message });
+}
+
+/** Сообщаем серверу, что сейчас на экране у семпая. Сервер не запущен — молча пропускаем. */
+function postContext(body) {
+  let url;
+  try { url = new URL("/api/context", serverUrl()); } catch { return; }
+  const data = JSON.stringify(body);
+  const req = http.request(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data) },
+    timeout: 3000,
+  });
+  req.on("error", () => {});
+  req.on("timeout", () => req.destroy());
+  req.end(data);
+}
+
+let contextTimer;
+let lastContext = "";
+let lastSentAt = 0;
+const CONTEXT_RESEND_MS = 5 * 60_000; // повторяем даже без изменений: сервер могли перезапустить
+function shareEditor() {
+  clearTimeout(contextTimer);
+  contextTimer = setTimeout(() => {
+    if (!vscode.workspace.getConfiguration("aiko").get("shareEditor", true)) return;
+    const editor = vscode.window.activeTextEditor;
+    const doc = editor?.document;
+    // только файлы на диске: безымянные и служебные (вывод, настройки) не отправляем
+    const body = doc && doc.uri.scheme === "file" ? {
+      path: doc.uri.fsPath,
+      line: editor.selection.start.line + 1,
+      end_line: editor.selection.end.line + 1,
+      selection: editor.selection.isEmpty ? "" : doc.getText(editor.selection).slice(0, MAX_CONTEXT_CHARS),
+    } : { path: null };
+    const key = JSON.stringify(body);
+    if (key === lastContext && Date.now() - lastSentAt < CONTEXT_RESEND_MS) return;
+    lastContext = key;
+    lastSentAt = Date.now();
+    postContext(body);
+  }, CONTEXT_DEBOUNCE_MS);
 }
 
 function activate(context) {
@@ -87,8 +131,15 @@ function activate(context) {
 
     vscode.commands.registerCommand("aiko.reload", () => {
       if (view) view.webview.html = html();
+      lastSentAt = 0; // сервер могли перезапустить — расскажем заново
+      shareEditor();
     }),
+
+    vscode.window.onDidChangeActiveTextEditor(shareEditor),
+    vscode.window.onDidChangeTextEditorSelection(shareEditor),
+    { dispose: () => clearTimeout(contextTimer) },
   );
+  shareEditor();
 }
 
 function deactivate() {}

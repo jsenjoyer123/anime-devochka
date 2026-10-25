@@ -184,7 +184,8 @@ class Handler(SimpleHTTPRequestHandler):
         return ctype.startswith("application/json") or ctype == "audio/wav"
 
     def do_POST(self):
-        if self.path not in ("/api/chat", "/api/tts", "/api/confirm", "/api/stt", "/api/project", "/api/broadcast"):
+        if self.path not in ("/api/chat", "/api/tts", "/api/confirm", "/api/stt", "/api/project", "/api/broadcast",
+                             "/api/context"):
             return self._json(404, {"error": "not found"})
         if not self._same_origin():
             return self._json(403, {"error": "forbidden"})
@@ -199,7 +200,7 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(400, {"error": "bad json"})
 
         if self.path == "/api/tts":
-            return self._tts(str(body.get("text", ""))[:MAX_TTS_CHARS].strip())
+            return self._tts(str(body.get("text", ""))[:MAX_TTS_CHARS].strip(), str(body.get("emotion") or ""))
         if self.path == "/api/broadcast":
             if isinstance(body.get("event"), dict):
                 HUB.publish(body["event"])
@@ -207,8 +208,14 @@ class Handler(SimpleHTTPRequestHandler):
 
         agent = AGENT  # берём один раз: проект могут переключить посреди запроса
         if self.path == "/api/confirm":
-            ok = agent.resolve_confirm(str(body.get("id", "")), body.get("approve") is True)
+            edited = body.get("message")
+            ok = agent.resolve_confirm(str(body.get("id", "")), body.get("approve") is True,
+                                       edited if isinstance(edited, str) else None)
             return self._json(200 if ok else 404, {"ok": ok})
+        if self.path == "/api/context":
+            # расширение VS Code: какой файл открыт и что выделено; файлы чужих проектов не принимаем
+            ok = agent.set_editor(body)
+            return self._json(200, {"ok": ok, "project": agent.ws.root.name})
         if self.path == "/api/project":
             root = Path(str(body.get("path", ""))).expanduser().resolve()
             if not root.is_dir():
@@ -264,13 +271,13 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(502, {"error": f"STT: {e}"})
         return self._json(200, {"text": text})
 
-    def _tts(self, text: str) -> None:
+    def _tts(self, text: str, emotion: str = "") -> None:
         if edge_tts is None:
             return self._json(501, {"error": "edge-tts не установлен"})
         if not text:
             return self._json(400, {"error": "пустой текст"})
         try:
-            audio = synthesize(text)
+            audio = synthesize(text, emotion)
         except Exception as e:
             return self._json(502, {"error": f"TTS: {e}"})
         self.send_response(200)

@@ -333,6 +333,7 @@ let voice = null;
 let queue = [];
 let speakToken = 0;
 let playing = false; // очередь речи сейчас проигрывается
+let voiceEmotion = "neutral"; // с какой эмоцией звучат фразы в очереди: тег действует до следующего
 
 // один <audio> на всё время: новые не создаём, чтобы не копить память
 const audioEl = new Audio();
@@ -397,11 +398,11 @@ function releaseAudio() {
   audioUrl = null;
 }
 
-function fetchTTS(text) {
+function fetchTTS(text, emotion) {
   return fetch("/api/tts", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text, emotion }),
   }).then((r) => (r.ok ? r.blob() : null)).catch(() => null);
 }
 
@@ -462,6 +463,9 @@ function forSpeech(text) {
     .trim();
 }
 
+// браузерный синтез: поправки к pitch и rate по эмоции (у edge-tts свои — на сервере)
+const BROWSER_VOICE = { happy: [0.1, 0.05], surprised: [0.2, 0.03], angry: [-0.05, 0.08], sad: [-0.25, -0.12], relaxed: [-0.1, -0.08] };
+
 /** Озвучивает ответ по предложениям, переключая эмоции по тегам. */
 function speak(text) {
   stopSpeaking();
@@ -471,6 +475,7 @@ function speak(text) {
 /** Добавить текст в очередь речи, не перебивая; если она молчит — начать говорить. */
 function enqueueSpeech(text) {
   for (const part of splitByTags(text)) {
+    if (part.emotion) voiceEmotion = part.emotion;
     // режем по концу предложения (знак + пробел), чтобы не рвать `server.py` и версии вроде 1.2
     const sentences = part.text.split(/(?<=[.!?…])\s+|\n+/).filter((s) => s.trim());
     if (!sentences.length && part.gesture) sentences.push(""); // жест без слов
@@ -478,6 +483,7 @@ function enqueueSpeech(text) {
       queue.push({
         emotion: i === 0 ? part.emotion : null,
         gesture: i === 0 ? part.gesture : null,
+        voice: voiceEmotion,
         text: s.trim(),
       });
     });
@@ -493,6 +499,7 @@ function quip(text) {
 
 function stopSpeaking() {
   queue = [];
+  voiceEmotion = "neutral";
   speakToken++;
   playing = false;
   releaseAudio();
@@ -541,8 +548,8 @@ async function playNext(token) {
 
   if (serverTTS) {
     // следующую фразу синтезируем заранее, пока звучит текущая
-    item.audio ??= fetchTTS(spoken);
-    if (queue[0]) queue[0].audio ??= fetchTTS(forSpeech(queue[0].text));
+    item.audio ??= fetchTTS(spoken, item.voice);
+    if (queue[0]) queue[0].audio ??= fetchTTS(forSpeech(queue[0].text), queue[0].voice);
     const blob = await item.audio;
     if (token !== speakToken) return;
     if (!blob) {
@@ -565,8 +572,9 @@ async function playNext(token) {
   const u = new SpeechSynthesisUtterance(spoken);
   u.lang = "ru-RU";
   if (voice) u.voice = voice;
-  u.pitch = 1.45; // повыше — по-анимешному
-  u.rate = 1.08;
+  const [dp, dr] = BROWSER_VOICE[item.voice] || [0, 0];
+  u.pitch = 1.45 + dp; // повыше — по-анимешному
+  u.rate = 1.08 + dr;
   u.onend = next;
   u.onerror = () => setTimeout(next, fallbackMs);
   speechSynthesis.speak(u);
@@ -601,27 +609,38 @@ function addMessage(kind, text) {
   return div;
 }
 
-/** Айко просит разрешения запустить команду — решает только семпай. */
+/** Айко просит разрешения запустить команду или закоммитить — решает только семпай. */
 function askConfirm(ev) {
-  const div = addMessage("aiko", `Можно запущу \`${ev.command}\`?${ev.reason ? `\n${ev.reason}` : ""}`);
+  const commit = ev.kind === "commit";
+  const more = commit && ev.files.length > 5 ? ` и ещё ${ev.files.length - 5}` : "";
+  const div = addMessage("aiko", commit
+    ? `Закоммитить ${ev.add_all ? "все изменения" : "то, что в индексе"}: ${ev.files.slice(0, 5).map((f) => `\`${f}\``).join(", ")}${more}? Сообщение можно поправить:`
+    : `Можно запущу \`${ev.command}\`?${ev.reason ? `\n${ev.reason}` : ""}`);
+  // сообщение коммита семпай правит прямо здесь — уйдёт то, что в поле
+  const text = commit ? Object.assign(document.createElement("textarea"), { className: "commit-msg", value: ev.message, rows: 3 }) : null;
   const row = document.createElement("div");
   row.className = "ask";
   const answer = async (approve) => {
-    row.replaceChildren(approve ? "✅ разрешено" : "⛔ запрещено");
+    const message = text?.value.trim();
+    text?.setAttribute("readonly", "");
+    row.replaceChildren(approve ? (commit ? "✅ коммитим" : "✅ разрешено") : "⛔ запрещено");
     await fetch("/api/confirm", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: ev.id, approve }),
+      body: JSON.stringify({ id: ev.id, approve, ...(message ? { message } : {}) }),
     }).catch(() => {});
   };
-  const yes = Object.assign(document.createElement("button"), { className: "yes", textContent: "Разрешить" });
-  const no = Object.assign(document.createElement("button"), { className: "no", textContent: "Запретить" });
+  const yes = Object.assign(document.createElement("button"), { className: "yes", textContent: commit ? "Закоммитить" : "Разрешить" });
+  const no = Object.assign(document.createElement("button"), { className: "no", textContent: commit ? "Не надо" : "Запретить" });
   yes.onclick = () => answer(true);
   no.onclick = () => answer(false);
   row.append(yes, no);
+  if (text) div.append(text);
   div.append(row);
   chat.scrollTop = chat.scrollHeight;
-  quip("[shy] Семпай, можно я кое-что запущу? Нажми «Разрешить» в чате.");
+  quip(commit
+    ? "[shy] Семпай, я придумала сообщение коммита. Глянешь и нажмёшь «Закоммитить»?"
+    : "[shy] Семпай, можно я кое-что запущу? Нажми «Разрешить» в чате.");
 }
 
 function setBusy(busy) {
@@ -729,6 +748,8 @@ function handleEvent(ev) {
     mirror({ t: "diagram", ev });
   } else if (ev.type === "confirm") {
     askConfirm(ev);
+  } else if (ev.type === "committed") {
+    lastHead = ev.head; // свой коммит она уже видела — реагировать на него не нужно
   } else if (ev.type === "reminder") {
     addReminder(ev.minutes, ev.text);
   } else if (ev.type === "quest") {
@@ -784,6 +805,7 @@ const ACTION_LABELS = {
   doc: "Айко, напиши ONBOARDING.md для команды 📄",
   first_task: "Айко, помоги выбрать первую задачу 🎯",
   quiz: "Айко, устрой мне экзамен по проекту 🎓",
+  commit: "Айко, помоги закоммитить ✅",
 };
 for (const btn of document.querySelectorAll("#actions button")) {
   btn.onclick = () => {
@@ -1120,8 +1142,11 @@ if (!OBS) setInterval(checkReminders, 10_000);
 // ---------- 👀 режим наблюдения: заметить правки семпая и предложить ревью ----------
 const WATCH_EVERY_MS = 30_000;
 const OFFER_COOLDOWN_MS = 5 * 60_000;
+const COMMIT_TALK_COOLDOWN_MS = 2 * 60_000; // серия коммитов подряд — одна реплика
 let watching = localStorage.getItem("aiko-watch") === "1";
 let lastSig = null;    // что уже видели
+let lastHead = null;   // последний известный коммит: сменился — семпай закоммитил
+let lastCommitTalk = -Infinity;
 let pendingSig = null; // новые правки ждут, пока «устоятся» (два опроса подряд без изменений)
 let lastOffer = -Infinity;
 
@@ -1129,7 +1154,7 @@ function setWatching(on) {
   watching = on;
   localStorage.setItem("aiko-watch", on ? "1" : "0");
   $("watch").classList.toggle("on", on);
-  lastSig = pendingSig = null;
+  lastSig = pendingSig = lastHead = null;
 }
 $("watch").onclick = () => {
   setWatching(!watching);
@@ -1146,7 +1171,18 @@ async function pollChanges() {
     addMessage("error", "Следить за правками умею только в git-проектах.");
     return;
   }
-  if (lastSig === null) { lastSig = c.sig; return; } // первый опрос — точка отсчёта
+  if (lastSig === null) { lastSig = c.sig; lastHead = c.head; return; } // первый опрос — точка отсчёта
+  if (c.head && c.head !== lastHead) {
+    // новый коммит: правки ушли в историю, предлагать ревью уже поздно — лучше прокомментировать
+    lastHead = c.head;
+    lastSig = c.sig;
+    pendingSig = null;
+    $("offer").hidden = true;
+    if (performance.now() - lastCommitTalk < COMMIT_TALK_COOLDOWN_MS || sendBtn.disabled) return;
+    lastCommitTalk = performance.now();
+    ask({ action: "new_commit" });
+    return;
+  }
   if (c.sig === lastSig) { pendingSig = null; return; }
   if (c.sig !== pendingSig) { pendingSig = c.sig; return; }
   lastSig = c.sig;

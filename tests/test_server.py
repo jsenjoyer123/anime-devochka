@@ -198,6 +198,12 @@ class HttpTest(Base):
         with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/changes", timeout=5) as r:
             self.assertEqual(json.load(r)["git"], True)
 
+    def test_context_endpoint(self):
+        status, body = self.post("/api/context", {"path": str(self.root / "src" / "app.py"), "line": 1})
+        self.assertEqual((status, body["ok"]), (200, True))
+        self.assertEqual(http_api.AGENT.editor["path"], "src/app.py")
+        self.assertEqual(self.post("/api/context", {"path": "/tmp"})[1]["ok"], False)
+
     def test_switch_project(self):
         other = self.tmp / "other"
         other.mkdir()
@@ -294,6 +300,88 @@ class ReminderAndWatchTest(Base):
         second = devtools.changes(self.root)
         self.assertNotEqual(first["sig"], second["sig"])
         self.assertIn("new.py", second["files"])
+
+
+class CommitTest(Base):
+    def setUp(self):
+        super().setUp()
+        for key, value in (("user.name", "t"), ("user.email", "t@t")):
+            subprocess.run(["git", "-C", str(self.root), "config", key, value], check=True)
+        (self.root / "src" / "app.py").write_text("def main():\n    return 7\n", encoding="utf-8")
+
+    def run_commit(self, approve, edited=None, **args):
+        agent = agent_mod.Agent(self.ws, "key", "model")
+        agent._llm = scripted(
+            {"role": "assistant", "content": None, "tool_calls": [tool_call("1", "commit", **args)]},
+            {"role": "assistant", "content": "ок"},
+        )
+        events = []
+
+        def emit(ev):
+            events.append(ev)
+            if ev["type"] == "confirm":
+                threading.Timer(0.05, agent.resolve_confirm, (ev["id"], approve, edited)).start()
+
+        agent.run("закоммить", emit)
+        return [m["content"] for m in agent.history if m["role"] == "tool"][0], events
+
+    def test_nothing_staged_is_not_committed(self):
+        result, events = self.run_commit(True, message="fix")
+        self.assertIn("в индексе пусто", result)
+        self.assertFalse([e for e in events if e["type"] == "confirm"])
+
+    def test_commit_with_edited_message(self):
+        before = devtools.head(self.root)
+        result, events = self.run_commit(True, "#7 поправила ответ", message="fix", add_all=True)
+        confirm = next(e for e in events if e["type"] == "confirm")
+        self.assertEqual((confirm["kind"], confirm["files"]), ("commit", ["src/app.py"]))
+        self.assertIn("Закоммитила", result)
+        head = devtools.head(self.root)
+        self.assertNotEqual(head, before)
+        self.assertEqual(next(e for e in events if e["type"] == "committed")["head"], head)
+        self.assertIn("#7 поправила ответ", devtools.git_log(self.root, max_count=1))
+        self.assertEqual(devtools.changes(self.root)["head"], head)
+
+    def test_denied_commit_changes_nothing(self):
+        subprocess.run(["git", "-C", str(self.root), "add", "-A"], check=True)
+        before = devtools.head(self.root)
+        result, _ = self.run_commit(False, message="fix")
+        self.assertIn("отказался", result)
+        self.assertEqual(devtools.head(self.root), before)
+
+
+class ProjectMemoryAndEditorTest(Base):
+    def test_project_memory_survives_relearn(self):
+        agent = agent_mod.Agent(self.ws, "key", "model")
+        self.ws.call("remember_project", {"fact": "тесты  запускаются через make test"})
+        self.ws.write_notes("# новые заметки")
+        prompt = agent.system_prompt()
+        self.assertIn("тесты запускаются через make test", prompt)
+        self.assertIn("# новые заметки", prompt)
+        self.assertFalse(workspace.SENPAI_PATH.exists())  # общая память о семпае не тронута
+
+    def test_editor_context(self):
+        agent = agent_mod.Agent(self.ws, "key", "model")
+        self.assertFalse(agent.set_editor({"path": "/etc/passwd"}))
+        self.assertFalse(agent.set_editor({"path": str(self.root / ".env")}))
+        self.assertTrue(agent.set_editor({"path": str(self.root / "src" / "app.py"), "line": 2,
+                                          "end_line": 2, "selection": "    return 42"}))
+        prompt = agent.system_prompt()
+        self.assertIn("`src/app.py`", prompt)
+        self.assertIn("return 42", prompt)
+        agent.set_editor({"path": None})
+        self.assertNotIn("src/app.py", agent.editor_hint())
+
+
+class VoiceTest(unittest.TestCase):
+    def test_emotion_shifts_voice(self):
+        import llm
+        self.assertEqual(llm._shift("+30Hz", 8, "Hz"), "+38Hz")
+        self.assertEqual(llm._shift("+8%", -12, "%"), "-4%")
+        self.assertEqual(llm._shift("странно", 5, "Hz"), "странно")
+        sad, plain = llm.voice_params("sad"), llm.voice_params("неизвестная")
+        self.assertEqual(plain["volume"], "+0%")
+        self.assertLess(int(sad["pitch"][:-2]), int(plain["pitch"][:-2]))
 
 
 class SeasonTest(unittest.TestCase):

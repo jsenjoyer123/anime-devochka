@@ -5,6 +5,7 @@
 import datetime
 import json
 import threading
+import time
 import uuid
 
 import devtools
@@ -19,6 +20,8 @@ MAX_HISTORY = 40            # сообщений в истории диалог�
 KEEP_FULL_TOOL_RESULTS = 6  # последние N результатов инструментов храним целиком, старые сжимаем
 MAX_SAVED_CHAT = 30         # столько реплик диалога помним между перезапусками сервера
 CONFIRM_TIMEOUT = 300       # сколько ждём, пока семпай нажмёт «разрешить»
+EDITOR_FRESH_SEC = 15 * 60  # контекст редактора старше этого считаем устаревшим
+MAX_EDITOR_SELECTION = 4_000
 
 PERSONA = """Ты — Айко-тян, AI-витубер в стиле Neuro-sama: милая, остроумная, чуть дерзкая \
 аниме-девочка с 3D-аватаром. Ты только что пришла в команду junior-разработчицей и проходишь \
@@ -50,6 +53,13 @@ git_hotspots, git_diff. Команды (тесты, сборку, линтер) 
 
 Запоминай важное о семпае инструментом remember: имя, роль, стек, что любит и не любит, \
 о чём договорились. Это общая память на все проекты — не записывай туда код и секреты.
+Всё, что касается только этого проекта, — договорённости, «как у нас принято», поправки \
+твоих ошибок («нет, тесты у нас запускаются через make test») — запоминай через remember_project. \
+Семпай тебя поправил — запомни, чтобы не ошибиться снова.
+
+Ты помогаешь коммитить: посмотри git_diff (staged=true и без), придумай сообщение коммита \
+в стиле истории проекта (загляни в git_log) и вызови commit — семпай увидит сообщение, \
+сможет поправить и подтвердит. Push ты не делаешь никогда.
 
 У семпая есть онбординг-квест. Отмечай шаги инструментом complete_quest, только когда \
 шаг действительно сделан (экскурсия дошла до конца, команда прошла успешно, ответы на экзамене \
@@ -94,6 +104,19 @@ FIRST_TASK = """Семпай хочет выбрать первую задачу
 Если GitHub недоступен или задач нет — найди в коде TODO/FIXME и мелкие улучшения и предложи их. \
 Когда семпай выберет задачу — отметь шаг квеста first_task."""
 
+COMMIT_TASK = """Семпай хочет закоммитить изменения. Посмотри git_diff со staged=true; если в индексе \
+пусто — git_diff без него (тогда коммить с add_all=true). Загляни в git_log, чтобы попасть в стиль \
+сообщений проекта (язык, префиксы вроде feat:/fix:). Если в изменениях есть явный мусор, отладочный \
+print или секреты — сначала скажи об этом. Затем вызови commit с сообщением: первая строка до 72 \
+символов, при необходимости — пустая строка и пара пунктов подробностей. Без тегов эмоций в сообщении. \
+Если изменений нет — так и скажи."""
+
+NEW_COMMIT_TASK = """(Системное событие, не сообщение семпая.) В проекте сменился HEAD — скорее всего, \
+семпай только что закоммитил. Посмотри git_log с max_count=3 и git_show HEAD и живо отреагируй \
+одной-двумя фразами, как стример: похвали, подколи или удивись по сути изменений \
+(«о, рефакторинг auth, смело!»). Если это не новый коммит, а pull или смена ветки — отреагируй на это. \
+Ничего не показывай на экране и ревью не устраивай."""
+
 QUIZ_TASK = """Устрой семпаю экзамен по проекту: 5 вопросов от простого к сложному \
 (назначение проекта, запуск, архитектура, конкретный модуль, «что будет, если…»). \
 Вопросы — по своим заметкам, ответы сверяй с кодом. Задавай ПО ОДНОМУ вопросу за ответ и жди ответа; \
@@ -124,7 +147,8 @@ LEARN_TASK = """Семпай попросил тебя пройти онборд
 
 # сценарные задания: кнопки и служебные события подставляют текст вместо сообщения семпая
 TASKS = {"learn": LEARN_TASK, "idle": IDLE_TASK, "tour": TOUR_TASK, "review": REVIEW_TASK,
-         "doc": DOC_TASK, "first_task": FIRST_TASK, "quiz": QUIZ_TASK}
+         "doc": DOC_TASK, "first_task": FIRST_TASK, "quiz": QUIZ_TASK, "commit": COMMIT_TASK,
+         "new_commit": NEW_COMMIT_TASK}
 
 TOOLS = [
     {"type": "function", "function": {
@@ -178,6 +202,12 @@ TOOLS = [
     {"type": "function", "function": {
         "name": "remember",
         "description": "Запомнить факт о семпае или вашей договорённости (одна строка). Помнится во всех проектах.",
+        "parameters": {"type": "object", "properties": {"fact": {"type": "string"}}, "required": ["fact"]},
+    }},
+    {"type": "function", "function": {
+        "name": "remember_project",
+        "description": "Запомнить факт только про этот проект (одна строка): договорённость, как принято, "
+                       "поправку твоей ошибки. Переживает переизучение проекта.",
         "parameters": {"type": "object", "properties": {"fact": {"type": "string"}}, "required": ["fact"]},
     }},
     {"type": "function", "function": {
@@ -268,6 +298,16 @@ TOOLS = [
         "parameters": {"type": "object", "properties": {"content": {"type": "string"}}, "required": ["content"]},
     }},
     {"type": "function", "function": {
+        "name": "commit",
+        "description": "Сделать git commit (без push). Семпай увидит сообщение и файлы, может поправить "
+                       "сообщение и должен подтвердить.",
+        "parameters": {"type": "object", "properties": {
+            "message": {"type": "string", "description": "Сообщение коммита"},
+            "add_all": {"type": "boolean", "default": False,
+                        "description": "true — сначала добавить в индекс все изменения (git add -A)"},
+        }, "required": ["message"]},
+    }},
+    {"type": "function", "function": {
         "name": "run_command",
         "description": "Выполнить shell-команду в корне проекта (тесты, сборка, линтер). "
                        "Семпай увидит команду и должен подтвердить. Таймаут 3 минуты.",
@@ -327,6 +367,10 @@ def describe_call(name: str, args: dict) -> str:
         return "пишу ONBOARDING.md ✎"
     if name == "remember":
         return "запоминаю про семпая ♡"
+    if name == "remember_project":
+        return "записываю, как тут принято ✎"
+    if name == "commit":
+        return "готовлю коммит ✎"
     if name.startswith("github_"):
         return "смотрю задачи на GitHub"
     if name == "complete_quest":
@@ -347,6 +391,7 @@ class Agent:
         self.lock = threading.Lock()  # один ответ за раз
         self.pending: dict[str, dict] = {}  # запросы на запуск команд: id → {event, approved}
         self.mood = 0.0  # -1 обижена … +1 счастлива; присылает браузер
+        self.editor: dict | None = None  # что открыто у семпая в редакторе; присылает расширение VS Code
         if ws.notes_path.is_file():
             ws.quest.complete("learn")  # проект изучали до появления квеста — засчитываем
         self.transcript: list[dict] = self._load_transcript()  # то, что видно в чате
@@ -359,8 +404,50 @@ class Agent:
         s += self.ws.quest.prompt_hint()
         if workspace.SENPAI_PATH.is_file():
             s += "\nЧто ты помнишь о семпае:\n" + workspace.SENPAI_PATH.read_text(encoding="utf-8")
+        if memory := self.ws.project_memory():
+            s += "\nДоговорённости и поправки в этом проекте (важнее заметок, если они расходятся):\n" + memory
+        s += self.editor_hint()
         if self.ws.notes_path.is_file():
             s += "\nТвои заметки с онбординга:\n\n" + self.ws.notes_path.read_text(encoding="utf-8")
+        return s
+
+    def set_editor(self, data: dict) -> bool:
+        """Контекст редактора от VS Code. Файлы вне проекта и секреты не принимаем:
+        семпай смотрит куда-то ещё — старый контекст забываем."""
+        self.editor = None
+        path = data.get("path")
+        if not path:
+            return True
+        try:
+            p = self.ws._resolve(str(path))
+        except ValueError:
+            return False
+        if self.ws._is_secret(p.name):
+            return False
+        def line(key: str) -> int:
+            try:
+                return max(1, int(data.get(key) or 1))
+            except (TypeError, ValueError):
+                return 1
+        self.editor = {
+            "path": self.ws._rel(p),
+            "line": line("line"),
+            "end_line": line("end_line"),
+            "selection": str(data.get("selection") or "")[:MAX_EDITOR_SELECTION],
+            "at": time.monotonic(),
+        }
+        return True
+
+    def editor_hint(self) -> str:
+        ed = self.editor
+        if not ed or time.monotonic() - ed["at"] > EDITOR_FRESH_SEC:
+            return ""
+        s = f"\nСейчас у семпая в редакторе открыт `{ed['path']}`, курсор на строке {ed['line']}. "
+        if ed["selection"].strip():
+            s += (f"Выделены строки {ed['line']}–{ed['end_line']}:\n```\n{ed['selection']}\n```\n"
+                  "Если семпай говорит «это», «тут», «вот этот код» — скорее всего, про выделенное.\n")
+        else:
+            s += "Если семпай говорит «этот файл» или «тут» — скорее всего, про него.\n"
         return s
 
     def has_notes(self) -> bool:
@@ -495,6 +582,8 @@ class Agent:
                 return "Схема на экране"
             if name == "run_command":
                 return self._run_confirmed(str(args["command"]), str(args.get("reason") or ""), emit)
+            if name == "commit":
+                return self._commit_confirmed(str(args["message"]), args.get("add_all") is True, emit)
             if name == "set_reminder":
                 minutes = float(args["minutes"])
                 if not 1 <= minutes <= 480:
@@ -522,31 +611,65 @@ class Agent:
             emit({"type": "quest", "quest": state, "gained": state["xp"] - before})
         return result
 
-    def _run_confirmed(self, command: str, reason: str, emit) -> str:
-        """Показываем команду семпаю и ждём его решения; без «да» ничего не запускаем."""
+    def _confirm(self, event: dict, emit) -> dict | None:
+        """Показываем запрос семпаю и ждём решения. None — не ответил;
+        иначе {"approved": bool, "message": правка семпая или None}."""
         rid = uuid.uuid4().hex
-        waiter = {"event": threading.Event(), "approved": False}
+        waiter = {"event": threading.Event(), "approved": False, "message": None}
         self.pending[rid] = waiter
         try:
-            emit({"type": "confirm", "id": rid, "command": command, "reason": reason[:300]})
+            emit({"type": "confirm", "id": rid, **event})
             # пингуем браузер: если вкладку закрыли, emit упадёт и ход прервётся, а не повиснет
             for _ in range(CONFIRM_TIMEOUT // 5):
                 if waiter["event"].wait(5):
-                    break
+                    return waiter
                 emit({"type": "ping"})
-            else:
-                return "Семпай не ответил — команду не запускала."
-            if not waiter["approved"]:
-                return "Семпай запретил запускать эту команду."
-            emit({"type": "tool", "text": f"запускаю: {command}"})
-            return devtools.run_command(self.ws.root, command)
+            return None
         finally:
             self.pending.pop(rid, None)
 
-    def resolve_confirm(self, rid: str, approved: bool) -> bool:
+    def _run_confirmed(self, command: str, reason: str, emit) -> str:
+        """Показываем команду семпаю и ждём его решения; без «да» ничего не запускаем."""
+        answer = self._confirm({"kind": "run", "command": command, "reason": reason[:300]}, emit)
+        if answer is None:
+            return "Семпай не ответил — команду не запускала."
+        if not answer["approved"]:
+            return "Семпай запретил запускать эту команду."
+        emit({"type": "tool", "text": f"запускаю: {command}"})
+        return devtools.run_command(self.ws.root, command)
+
+    def _commit_confirmed(self, message: str, add_all: bool, emit) -> str:
+        """Коммит только с «да» семпая; сообщение семпай может поправить прямо в чате."""
+        message = message.strip()[:devtools.MAX_COMMIT_MESSAGE]
+        if not message:
+            return "Нужно сообщение коммита."
+        if add_all:
+            files = devtools.changes(self.ws.root)["files"]
+        else:
+            files = devtools.staged_files(self.ws.root)
+        if not files:
+            return ("Коммитить нечего: в индексе пусто. Можно commit с add_all=true, если семпай хочет "
+                    "закоммитить всё." if not add_all else "Коммитить нечего: изменений нет.")
+        answer = self._confirm({"kind": "commit", "message": message, "files": files[:30],
+                                "add_all": add_all}, emit)
+        if answer is None:
+            return "Семпай не ответил — не коммитила."
+        if not answer["approved"]:
+            return "Семпай отказался от коммита."
+        final = (answer["message"] or message).strip()[:devtools.MAX_COMMIT_MESSAGE] or message
+        emit({"type": "tool", "text": "коммичу ✎"})
+        result = devtools.git_commit(self.ws.root, final, add_all)
+        if result.startswith("Закоммитила"):
+            emit({"type": "committed", "head": devtools.head(self.ws.root)})
+        if final != message:
+            result += f"\n(семпай поправил сообщение на: {final})"
+        return result
+
+    def resolve_confirm(self, rid: str, approved: bool, message: str | None = None) -> bool:
         waiter = self.pending.get(rid)
         if not waiter:
             return False
         waiter["approved"] = approved
+        waiter["message"] = message
         waiter["event"].set()
         return True

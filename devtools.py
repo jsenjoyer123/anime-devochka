@@ -20,6 +20,8 @@ GIT_TIMEOUT = 15
 MAX_GIT_CHARS = 15_000
 RUN_TIMEOUT = 180
 MAX_RUN_CHARS = 8_000
+COMMIT_TIMEOUT = 120  # с запасом на pre-commit хуки
+MAX_COMMIT_MESSAGE = 2_000
 
 REV_RE = re.compile(r"^(HEAD(~\d+|\^+)?|[0-9a-fA-F]{4,40})$")
 
@@ -92,7 +94,40 @@ def changes(root: Path) -> dict:
     # _git срезает пробелы по краям, поэтому у первой строки может не быть ведущего пробела статуса
     files = [line.split(maxsplit=1)[1] for line in status.splitlines() if len(line.split(maxsplit=1)) == 2]
     sig = hashlib.sha1((status + numstat).encode()).hexdigest() if files else ""
-    return {"git": True, "sig": sig, "files": files[:50]}
+    return {"git": True, "sig": sig, "files": files[:50], "head": head(root)}
+
+
+def head(root: Path) -> str:
+    """Хеш текущего коммита; пусто, если коммитов ещё нет."""
+    out = _git(root, "rev-parse", "--verify", "-q", "HEAD")
+    return out if re.fullmatch(r"[0-9a-f]{40,64}", out) else ""
+
+
+def staged_files(root: Path) -> list[str]:
+    out = _git(root, "diff", "--staged", "--name-only", "--no-ext-diff")
+    if out.startswith(("Это не", "git ")) or out == "(пусто)":
+        return []
+    return out.splitlines()
+
+
+def git_commit(root: Path, message: str, add_all: bool = False) -> str:
+    """Коммит того, что в индексе (add_all — сначала git add -A). Без push.
+    Вызывать ТОЛЬКО после подтверждения семпая."""
+    if add_all:
+        _git(root, "add", "-A")
+    # сообщение через stdin: никаких проблем с кавычками и «-» в начале; строки с # не выбрасываем
+    try:
+        proc = subprocess.run(
+            [*GIT_BASE, "-C", str(root), "commit", "--file=-", "--cleanup=whitespace"],
+            input=message, capture_output=True, text=True, errors="replace", timeout=COMMIT_TIMEOUT,
+            env={**os.environ, "GIT_PAGER": "cat", "GIT_TERMINAL_PROMPT": "0", "GIT_EDITOR": "true"},
+        )
+    except subprocess.TimeoutExpired:
+        return "git commit думал слишком долго (хуки?), прервала."
+    out = (proc.stdout + proc.stderr).strip()[-MAX_RUN_CHARS:]
+    if proc.returncode != 0:
+        return f"Коммит не получился (код {proc.returncode}):\n{out}"
+    return f"Закоммитила {head(root)[:8]}:\n{out}"
 
 
 GITHUB_API = "https://api.github.com"

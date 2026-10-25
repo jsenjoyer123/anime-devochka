@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 
@@ -25,6 +26,15 @@ STT_FALLBACKS = ["google/gemini-3-flash-preview", "qwen/qwen3.8-omni-flash"]  # 
 TTS_VOICE = "ru-RU-SvetlanaNeural"
 TTS_PITCH = "+30Hz"  # повыше — по-анимешному
 TTS_RATE = "+8%"
+
+# эмоции в голосе: сдвиги к базовым pitch/rate (Гц, %) и громкость (%)
+EMOTION_VOICE = {
+    "happy": (8, 6, 0),
+    "surprised": (14, 4, 5),
+    "angry": (-4, 8, 8),
+    "sad": (-14, -12, -15),
+    "relaxed": (-6, -8, -5),
+}
 
 MAX_TTS_CHARS = 600         # озвучиваем по предложению, длиннее не нужно
 MAX_AUDIO_BYTES = 1_500_000  # ~45 секунд речи в WAV 16 кГц моно
@@ -62,15 +72,28 @@ def transcribe(wav: bytes, api_key: str) -> str:
     return (data["choices"][0]["message"].get("content") or "").strip()
 
 
-def synthesize(text: str) -> bytes:
+def _shift(value: str, delta: int, unit: str) -> str:
+    """'+30Hz' + 8 → '+38Hz'. Непонятное значение из .env оставляем как есть."""
+    m = re.fullmatch(r"([+-]?\d+)" + unit, value.strip())
+    if not m or not delta:
+        return value
+    return f"{int(m.group(1)) + delta:+d}{unit}"
+
+
+def voice_params(emotion: str = "") -> dict:
+    """pitch/rate/volume для edge-tts с поправкой на эмоцию фразы."""
+    dp, dr, dv = EMOTION_VOICE.get(emotion, (0, 0, 0))
+    return {
+        "pitch": _shift(os.environ.get("AIKO_PITCH", TTS_PITCH), dp, "Hz"),
+        "rate": _shift(os.environ.get("AIKO_RATE", TTS_RATE), dr, "%"),
+        "volume": f"{dv:+d}%",
+    }
+
+
+def synthesize(text: str, emotion: str = "") -> bytes:
     """Озвучка одной фразы в mp3."""
     async def collect() -> bytes:
-        comm = edge_tts.Communicate(
-            text,
-            os.environ.get("AIKO_VOICE", TTS_VOICE),
-            pitch=os.environ.get("AIKO_PITCH", TTS_PITCH),
-            rate=os.environ.get("AIKO_RATE", TTS_RATE),
-        )
+        comm = edge_tts.Communicate(text, os.environ.get("AIKO_VOICE", TTS_VOICE), **voice_params(emotion))
         chunks = [c["data"] async for c in comm.stream() if c["type"] == "audio"]
         return b"".join(chunks)
 

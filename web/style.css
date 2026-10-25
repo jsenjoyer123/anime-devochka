@@ -245,6 +245,10 @@ button.on { background: #e2336b; color: #fff; }
 .msg .ask button { font-size: 12px; padding: 5px 10px; }
 .msg .ask .yes { background: #b8f0c8; }
 .msg .ask .no { background: #ffd0d0; }
+.msg .commit-msg {
+  display: block; width: 100%; box-sizing: border-box; margin-top: 8px; padding: 6px 8px;
+  font: 12px/1.4 ui-monospace, monospace; border: 1px solid #f0c3d8; border-radius: 8px; resize: vertical;
+}
 .msg a { color: #b03a7c; font-weight: 700; }
 
 /* ---------- фоны под проект (выбирает Айко в set_outfit) ---------- */

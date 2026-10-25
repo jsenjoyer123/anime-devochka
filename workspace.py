@@ -18,6 +18,7 @@ NOTES_DIR = HERE / "notes"
 SENPAI_PATH = NOTES_DIR / "_senpai.md"      # что Айко помнит о семпае — общее для всех проектов
 RECENT_PATH = NOTES_DIR / "_projects.json"  # недавние проекты для переключателя
 MAX_SENPAI_LINES = 60
+MAX_PROJECT_MEMORY_LINES = 60
 MAX_RECENT = 10
 
 MAX_READ_CHARS = 20_000     # символов файла за одно чтение
@@ -73,6 +74,8 @@ class Workspace:
         self.outfit_path = notes_path.with_suffix(".outfit.json")
         self.onboarding_path = notes_path.with_suffix(".ONBOARDING.md")
         self.chat_path = notes_path.with_suffix(".chat.json")
+        # договорённости и поправки — отдельно от заметок: «Переизучить» перезаписывает заметки целиком
+        self.memory_path = notes_path.with_suffix(".memory.md")
         self.quest = Quest(notes_path.with_suffix(".quest.json"))
 
     def _resolve(self, rel: str) -> Path:
@@ -203,15 +206,25 @@ class Workspace:
         except (OSError, json.JSONDecodeError):
             return None
 
-    def remember(self, fact: str) -> str:
+    @staticmethod
+    def _append_fact(path: Path, fact: str, limit: int) -> str:
         fact = " ".join(str(fact).split())[:300]
         if not fact:
             return "Нечего запоминать."
-        lines = SENPAI_PATH.read_text(encoding="utf-8").splitlines() if SENPAI_PATH.is_file() else []
+        lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
         lines.append(f"- {datetime.date.today():%d.%m.%Y}: {fact}")
-        SENPAI_PATH.parent.mkdir(parents=True, exist_ok=True)
-        SENPAI_PATH.write_text("\n".join(lines[-MAX_SENPAI_LINES:]) + "\n", encoding="utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines[-limit:]) + "\n", encoding="utf-8")
         return "Запомнила."
+
+    def remember(self, fact: str) -> str:
+        return self._append_fact(SENPAI_PATH, fact, MAX_SENPAI_LINES)
+
+    def remember_project(self, fact: str) -> str:
+        return self._append_fact(self.memory_path, fact, MAX_PROJECT_MEMORY_LINES)
+
+    def project_memory(self) -> str:
+        return self.memory_path.read_text(encoding="utf-8") if self.memory_path.is_file() else ""
 
     def write_onboarding_doc(self, content: str) -> str:
         self.onboarding_path.parent.mkdir(parents=True, exist_ok=True)
@@ -267,6 +280,7 @@ class Workspace:
         fn = {"list_dir": self.list_dir, "read_file": self.read_file, "search": self.search,
               "write_notes": self.write_notes, "set_outfit": self.set_outfit,
               "write_onboarding_doc": self.write_onboarding_doc, "remember": self.remember,
+              "remember_project": self.remember_project,
               "git_log": self.git_log, "git_show": self.git_show, "git_blame": self.git_blame,
               "git_hotspots": self.git_hotspots, "git_diff": self.git_diff,
               "github_issues": self.github_issues, "github_issue": self.github_issue,
