@@ -4,6 +4,7 @@ import { VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
 import { applyOutfit, removeOutfit } from "./outfit.js";
 import { Motion, idlePose, GESTURE_NAMES } from "./motion.js";
 import { showCode, showDiagram, isScreenVisible } from "./screen.js";
+import { Ear } from "./mic.js";
 
 // Если своей модели нет в web/models/aiko.vrm — берём пример из репозитория three-vrm
 const MODEL_URLS = [
@@ -290,6 +291,7 @@ let serverTTS = false; // голос с сервера (edge-tts); иначе �
 let voice = null;
 let queue = [];
 let speakToken = 0;
+let playing = false; // очередь речи сейчас проигрывается
 
 // один <audio> на всё время: новые не создаём, чтобы не копить память
 const audioEl = new Audio();
@@ -392,8 +394,14 @@ function forSpeech(text) {
 /** Озвучивает ответ по предложениям, переключая эмоции по тегам. */
 function speak(text) {
   stopSpeaking();
+  enqueueSpeech(text);
+}
+
+/** Добавить текст в очередь речи, не перебивая; если она молчит — начать говорить. */
+function enqueueSpeech(text) {
   for (const part of splitByTags(text)) {
-    const sentences = (part.text.match(/[^.!?…\n]+[.!?…]*/g) || []).filter((s) => s.trim());
+    // режем по концу предложения (знак + пробел), чтобы не рвать `server.py` и версии вроде 1.2
+    const sentences = part.text.split(/(?<=[.!?…])\s+|\n+/).filter((s) => s.trim());
     if (!sentences.length && part.gesture) sentences.push(""); // жест без слов
     sentences.forEach((s, i) => {
       queue.push({
@@ -403,18 +411,19 @@ function speak(text) {
       });
     });
   }
-  playNext(++speakToken);
+  if (!playing) playNext(speakToken);
 }
 
 /** Короткая реплика «между делом»: не перебивает, если она уже говорит. */
 function quip(text) {
-  if (state.talking || muted) return;
+  if (state.talking || playing || muted) return;
   speak(text);
 }
 
 function stopSpeaking() {
   queue = [];
   speakToken++;
+  playing = false;
   releaseAudio();
   if ("speechSynthesis" in window) speechSynthesis.cancel();
   state.talking = false;
@@ -423,6 +432,7 @@ function stopSpeaking() {
 async function playNext(token) {
   if (token !== speakToken) return;
   const item = queue.shift();
+  playing = Boolean(item);
   if (!item) {
     state.talking = false;
     setTimeout(() => { if (!state.talking) subtitles.textContent = ""; }, 2500);
@@ -490,10 +500,9 @@ async function playNext(token) {
 // Чат с бэкендом
 // ============================================================
 
-function addMessage(kind, text) {
-  const div = document.createElement("div");
-  div.className = `msg ${kind}`;
-  // `код` показываем моноширинным, всё остальное — как текст (без innerHTML)
+/** `код` показываем моноширинным, всё остальное — как текст (без innerHTML). */
+function renderText(div, text) {
+  div.replaceChildren();
   text.split(/`([^`]+)`/).forEach((chunk, i) => {
     if (i % 2) {
       const code = document.createElement("code");
@@ -503,6 +512,12 @@ function addMessage(kind, text) {
       div.append(chunk);
     }
   });
+}
+
+function addMessage(kind, text) {
+  const div = document.createElement("div");
+  div.className = `msg ${kind}`;
+  renderText(div, text);
   chat.append(div);
   while (chat.children.length > MAX_CHAT_MESSAGES) chat.firstElementChild.remove();
   chat.scrollTop = chat.scrollHeight;
@@ -546,9 +561,47 @@ function setBusy(busy) {
   }
 }
 
+// ответ, который ещё пишется: текст в чате обновляется, готовые предложения сразу озвучиваются
+let live = null; // { raw, pending, div }
+
+function onDelta(text) {
+  if (!live) {
+    stopSpeaking();
+    live = { raw: "", pending: "", div: addMessage("aiko", "") };
+  }
+  live.raw += text;
+  live.pending += text;
+  renderText(live.div, stripTags(live.raw).replace(/\[[a-z]*$/i, "")); // недописанный тег не показываем
+  chat.scrollTop = chat.scrollHeight;
+  feedSpeech(false);
+}
+
+/** Отдаём в озвучку законченные предложения; final — дописать хвост. */
+function feedSpeech(final) {
+  let m;
+  while ((m = live.pending.match(/^[\s\S]*?(?:[.!?…]+(?=\s)|\n)/))) {
+    enqueueSpeech(m[0]);
+    live.pending = live.pending.slice(m[0].length);
+  }
+  if (final) {
+    enqueueSpeech(live.pending);
+    live.pending = "";
+  }
+}
+
+function finishLive(kind) {
+  if (!live) return false;
+  feedSpeech(true);
+  live.div.className = `msg ${kind}`;
+  if (!stripTags(live.raw)) live.div.remove();
+  live = null;
+  return true;
+}
+
 async function ask(payload) {
   setBusy(true);
   stopSpeaking();
+  live = null;
   try {
     const res = await fetch("/api/chat", {
       method: "POST",
@@ -598,16 +651,21 @@ function handleEvent(ev) {
   } else if (ev.type === "doc") {
     const div = addMessage("aiko", "ONBOARDING.md готов: ");
     div.append(Object.assign(document.createElement("a"), { href: ev.url, textContent: "скачать", download: "ONBOARDING.md" }));
+  } else if (ev.type === "delta") {
+    onDelta(ev.text);
   } else if (ev.type === "thought") {
-    if (!stripTags(ev.text)) return;
-    addMessage("tool", stripTags(ev.text));
+    // текст перед вызовом инструментов — это она думает вслух
     lastNarration = performance.now();
-    quip(ev.text); // думает вслух
+    if (finishLive("tool") || !stripTags(ev.text)) return;
+    addMessage("tool", stripTags(ev.text));
+    quip(ev.text);
   } else if (ev.type === "reply") {
     setBusy(false);
     $("next").hidden = !touring;
-    addMessage("aiko", stripTags(ev.text));
-    speak(ev.text);
+    if (!finishLive("aiko")) {
+      addMessage("aiko", stripTags(ev.text));
+      speak(ev.text);
+    }
     refreshStatus();
   } else if (ev.type === "error") {
     addMessage("error", ev.text);
@@ -652,25 +710,46 @@ $("next").onclick = () => {
   ask({ message: "Дальше" });
 };
 
-// голосовой ввод — только если браузер умеет (Chrome отправляет звук в Google)
-const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-if (Recognition) {
+// разговор голосом без кнопок: включил 🎤 — она слушает, сама понимает начало и конец фразы
+const ear = new Ear({
+  // пока она говорит, порог выше: так её собственный голос из динамиков не считается речью семпая
+  sensitivity: () => (state.talking ? 2.5 : 1),
+  onStart: () => {
+    wakeUp();
+    if (state.talking && !state.thinking) stopSpeaking(); // перебили — замолкаем
+    state.tilt = 0.12; // прислушивается
+  },
+  onUtterance: async (wav) => {
+    state.tilt = 0;
+    if (sendBtn.disabled) return; // она занята ответом — фразу пропускаем
+    try {
+      const res = await fetch("/api/stt", { method: "POST", headers: { "Content-Type": "audio/wav" }, body: wav });
+      const { text, error } = await res.json();
+      if (error) throw new Error(error);
+      if (!text || sendBtn.disabled) return;
+      addMessage("user", `🎤 ${text}`);
+      ask({ message: text });
+    } catch (e) {
+      addMessage("error", `Не расслышала: ${e.message}`);
+    }
+  },
+});
+
+if (navigator.mediaDevices?.getUserMedia && window.AudioWorkletNode) {
   micBtn.hidden = false;
-  let rec = null;
-  micBtn.onclick = () => {
-    if (rec) { rec.stop(); return; }
-    rec = new Recognition();
-    rec.lang = "ru-RU";
-    rec.interimResults = false;
-    rec.onresult = (e) => {
-      input.value = e.results[0][0].transcript;
-      $("form").requestSubmit();
-    };
-    rec.onerror = (e) => addMessage("error", `Микрофон: ${e.error}`);
-    rec.onend = () => { rec = null; micBtn.classList.remove("on"); };
-    micBtn.classList.add("on");
-    stopSpeaking();
-    rec.start();
+  micBtn.onclick = async () => {
+    if (ear.active) {
+      ear.stop();
+      micBtn.classList.remove("on");
+      return;
+    }
+    try {
+      await ear.start();
+      micBtn.classList.add("on");
+      quip("[happy] Слушаю, семпай! Просто говори.");
+    } catch (e) {
+      addMessage("error", `Микрофон недоступен: ${e.message}`);
+    }
   };
 }
 

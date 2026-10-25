@@ -8,6 +8,7 @@
 
 import argparse
 import asyncio
+import base64
 import fnmatch
 import json
 import os
@@ -42,6 +43,11 @@ MAX_HISTORY = 40            # сообщений в истории диалог�
 KEEP_FULL_TOOL_RESULTS = 6  # последние N результатов инструментов храним целиком, старые сжимаем
 MAX_BODY_BYTES = 64_000     # максимальный размер запроса из браузера
 MAX_TTS_CHARS = 600         # озвучиваем по предложению, длиннее не нужно
+MAX_AUDIO_BYTES = 1_500_000 # ~45 секунд речи в WAV 16 кГц моно
+
+# распознавание речи: дешёвая модель OpenRouter, которая понимает аудио (меняется в .env)
+STT_MODEL = "google/gemini-2.5-flash-lite"
+STT_FALLBACKS = ["google/gemini-3-flash-preview", "qwen/qwen3.8-omni-flash"]  # если основную ограничили
 
 # голос можно поменять в .env
 TTS_VOICE = "ru-RU-SvetlanaNeural"
@@ -521,21 +527,38 @@ class Agent:
     def has_notes(self) -> bool:
         return self.ws.notes_path.is_file()
 
-    def _llm(self, messages: list) -> dict:
-        body = json.dumps({"model": self.model, "messages": messages, "tools": TOOLS}).encode()
-        req = urllib.request.Request(API_URL, data=body, headers={
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            "X-Title": "Aiko-chan onboarding",
-        })
-        try:
-            with urllib.request.urlopen(req, timeout=300) as resp:
-                data = json.load(resp)
-        except urllib.error.HTTPError as e:
-            raise RuntimeError(f"OpenRouter HTTP {e.code}: {e.read(2000).decode(errors='replace')}") from e
-        if "error" in data:
-            raise RuntimeError(f"OpenRouter: {data['error']}")
-        return data["choices"][0]["message"]
+    def _llm(self, messages: list, emit) -> dict:
+        """Запрос к модели в потоковом режиме: текст уходит в браузер по кусочкам,
+        чтобы Айко начинала говорить, пока ответ ещё пишется."""
+        body = json.dumps({"model": self.model, "messages": messages, "tools": TOOLS, "stream": True}).encode()
+        content: list[str] = []
+        calls: dict[int, dict] = {}
+        with openrouter_request(body, self.api_key) as resp:
+            for raw in resp:  # SSE построчно — весь ответ в памяти не держим
+                line = raw.decode("utf-8", errors="replace").strip()
+                if not line.startswith("data:"):
+                    continue  # пустые строки и комментарии-пинги OpenRouter
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                chunk = json.loads(data)
+                if "error" in chunk:
+                    raise RuntimeError(f"OpenRouter: {chunk['error']}")
+                delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
+                if delta.get("content"):
+                    content.append(delta["content"])
+                    emit({"type": "delta", "text": delta["content"]})
+                for tc in delta.get("tool_calls") or []:
+                    slot = calls.setdefault(tc.get("index", 0), {
+                        "id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                    slot["id"] = tc.get("id") or slot["id"]
+                    fn = tc.get("function") or {}
+                    slot["function"]["name"] += fn.get("name") or ""
+                    slot["function"]["arguments"] += fn.get("arguments") or ""
+        msg = {"role": "assistant", "content": "".join(content) or None}
+        if calls:
+            msg["tool_calls"] = [calls[i] for i in sorted(calls)]
+        return msg
 
     def _compact(self) -> None:
         """Сжимаем старые результаты инструментов и обрезаем историю, чтобы она не росла бесконечно."""
@@ -574,14 +597,15 @@ class Agent:
         self.history.append({"role": "user", "content": user_text})
         for _ in range(MAX_STEPS):
             self._compact()
-            msg = self._llm([{"role": "system", "content": self.system_prompt()}] + self.history)
-            self.history.append({k: v for k, v in msg.items() if k in ("role", "content", "tool_calls")})
+            msg = self._llm([{"role": "system", "content": self.system_prompt()}] + self.history, emit)
+            self.history.append(msg)
             calls = msg.get("tool_calls") or []
+            # текст уже ушёл кусочками (delta) — тут только говорим, чем он оказался
             if not calls:
-                emit({"type": "reply", "text": msg.get("content") or ""})
+                emit({"type": "reply", "text": msg.get("content") or "", "streamed": True})
                 return
             if msg.get("content"):
-                emit({"type": "thought", "text": msg["content"]})
+                emit({"type": "thought", "text": msg["content"], "streamed": True})
             for call in calls:
                 name = call["function"]["name"]
                 try:
@@ -651,6 +675,38 @@ class Agent:
 AGENT: Agent | None = None
 
 
+def openrouter_request(body: bytes, api_key: str):
+    req = urllib.request.Request(API_URL, data=body, headers={
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "X-Title": "Aiko-chan onboarding",
+    })
+    try:
+        return urllib.request.urlopen(req, timeout=300)
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"OpenRouter HTTP {e.code}: {e.read(2000).decode(errors='replace')}") from e
+
+
+def transcribe(wav: bytes, api_key: str) -> str:
+    """Речь семпая → текст через модель OpenRouter, которая понимает аудио."""
+    body = json.dumps({
+        # OpenRouter сам переключится на следующую модель, если предыдущая недоступна
+        "models": list(dict.fromkeys([os.environ.get("AIKO_STT_MODEL", STT_MODEL), *STT_FALLBACKS])),
+        "temperature": 0,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "Дословно запиши, что сказано в аудио, на языке оригинала "
+                                     "(обычно русский). Только текст, без пояснений и кавычек. "
+                                     "Если речи нет или неразборчиво — верни пустую строку."},
+            {"type": "input_audio", "input_audio": {"data": base64.b64encode(wav).decode(), "format": "wav"}},
+        ]}],
+    }).encode()
+    with openrouter_request(body, api_key) as resp:
+        data = json.load(resp)
+    if "error" in data:
+        raise RuntimeError(f"OpenRouter: {data['error']}")
+    return (data["choices"][0]["message"].get("content") or "").strip()
+
+
 def synthesize(text: str) -> bytes:
     """Озвучка одной фразы в mp3."""
     async def collect() -> bytes:
@@ -716,15 +772,18 @@ class Handler(SimpleHTTPRequestHandler):
         origin = self.headers.get("Origin")
         if origin and origin.split("://", 1)[-1] not in allowed:
             return False
-        # JSON заставляет браузер делать preflight для чужих сайтов, а его мы не разрешаем
-        return (self.headers.get("Content-Type") or "").startswith("application/json")
+        # JSON и audio/wav заставляют браузер делать preflight для чужих сайтов, а его мы не разрешаем
+        ctype = self.headers.get("Content-Type") or ""
+        return ctype.startswith("application/json") or ctype == "audio/wav"
 
     def do_POST(self):
-        if self.path not in ("/api/chat", "/api/tts", "/api/confirm"):
+        if self.path not in ("/api/chat", "/api/tts", "/api/confirm", "/api/stt"):
             return self._json(404, {"error": "not found"})
         if not self._same_origin():
             return self._json(403, {"error": "forbidden"})
         length = int(self.headers.get("Content-Length") or 0)
+        if self.path == "/api/stt":
+            return self._stt(length)
         if length > MAX_BODY_BYTES:
             return self._json(413, {"error": "слишком длинное сообщение"})
         try:
@@ -767,6 +826,17 @@ class Handler(SimpleHTTPRequestHandler):
                 pass
         finally:
             AGENT.lock.release()
+
+    def _stt(self, length: int) -> None:
+        if self.headers.get("Content-Type") != "audio/wav":
+            return self._json(415, {"error": "нужен audio/wav"})
+        if not 0 < length <= MAX_AUDIO_BYTES:
+            return self._json(413, {"error": "слишком длинная запись"})
+        try:
+            text = transcribe(self.rfile.read(length), AGENT.api_key)
+        except Exception as e:
+            return self._json(502, {"error": f"STT: {e}"})
+        return self._json(200, {"text": text})
 
     def _tts(self, text: str) -> None:
         if edge_tts is None:
