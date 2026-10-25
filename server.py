@@ -13,6 +13,7 @@ import datetime
 import fnmatch
 import json
 import os
+import queue
 import re
 import threading
 import urllib.error
@@ -83,6 +84,8 @@ PERSONA = """Ты — Айко-тян, AI-витубер в стиле Neuro-sam
 - Ты живая и двигаешься: ставь перед фразой тег жеста, когда он к месту (не больше 1–2 на ответ): \
 [wave] помахать, [nod] кивнуть, [shake] помотать головой, [clap] похлопать, [cheer] руки вверх \
 от радости, [think] задуматься, [shy] смутиться, [bow] поклониться, [hop] подпрыгнуть, [stretch] потянуться.
+- Пол семпая тебе неизвестен, пока семпай не расскажет о себе: избегай родовых окончаний \
+(не «соскучился», а «скучаешь»; не «устал», а «устали глазки?»).
 - Характер как у Neuro-sama: можешь подколоть семпая, пошутить про легаси и чужой код, \
 изобразить драму из-за TODO от 2019 года — но без грубости.
 
@@ -743,6 +746,35 @@ API_KEY = ""
 MODEL = ""
 
 
+class Hub:
+    """Ретрансляция событий основной вкладки в окна-зрители (OBS): субтитры, жесты, образ."""
+
+    def __init__(self):
+        self.subs: set[queue.Queue] = set()
+        self.lock = threading.Lock()
+
+    def publish(self, event: dict) -> None:
+        with self.lock:
+            for q in self.subs:
+                try:
+                    q.put_nowait(event)
+                except queue.Full:
+                    pass  # зритель не успевает — лучше потерять кадр, чем копить память
+
+    def subscribe(self) -> queue.Queue:
+        q = queue.Queue(maxsize=100)
+        with self.lock:
+            self.subs.add(q)
+        return q
+
+    def unsubscribe(self, q: queue.Queue) -> None:
+        with self.lock:
+            self.subs.discard(q)
+
+
+HUB = Hub()
+
+
 def open_project(root: Path) -> Agent:
     """Сделать проект текущим (агента создаём один раз и держим в кэше)."""
     global AGENT
@@ -841,6 +873,8 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         agent = AGENT
+        if self.path == "/api/events":
+            return self._events()
         if self.path == "/api/status":
             return self._json(200, {
                 "project": agent.ws.root.name,
@@ -857,6 +891,28 @@ class Handler(SimpleHTTPRequestHandler):
             return self._onboarding(agent)
         return super().do_GET()
 
+    def _events(self) -> None:
+        """SSE-поток для зрителей. Пинг раз в 15 секунд — так замечаем закрытые окна."""
+        if not self._same_host():
+            return self._json(403, {"error": "forbidden"})
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        q = HUB.subscribe()
+        try:
+            while True:
+                try:
+                    line = f"data: {json.dumps(q.get(timeout=15), ensure_ascii=False)}\n\n"
+                except queue.Empty:
+                    line = ": ping\n\n"
+                self.wfile.write(line.encode())
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            HUB.unsubscribe(q)
+
     def _onboarding(self, agent: "Agent") -> None:
         try:
             data = agent.ws.onboarding_path.read_bytes()
@@ -869,11 +925,17 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _allowed_hosts(self) -> set[str]:
+        port = self.server.server_address[1]
+        return {f"127.0.0.1:{port}", f"localhost:{port}"}
+
+    def _same_host(self) -> bool:
+        return self.headers.get("Host") in self._allowed_hosts()
+
     def _same_origin(self) -> bool:
         """Защита от чужих сайтов в браузере (CSRF) и DNS rebinding: Айко умеет запускать команды."""
-        port = self.server.server_address[1]
-        allowed = {f"127.0.0.1:{port}", f"localhost:{port}"}
-        if self.headers.get("Host") not in allowed:
+        allowed = self._allowed_hosts()
+        if not self._same_host():
             return False
         origin = self.headers.get("Origin")
         if origin and origin.split("://", 1)[-1] not in allowed:
@@ -883,7 +945,7 @@ class Handler(SimpleHTTPRequestHandler):
         return ctype.startswith("application/json") or ctype == "audio/wav"
 
     def do_POST(self):
-        if self.path not in ("/api/chat", "/api/tts", "/api/confirm", "/api/stt", "/api/project"):
+        if self.path not in ("/api/chat", "/api/tts", "/api/confirm", "/api/stt", "/api/project", "/api/broadcast"):
             return self._json(404, {"error": "not found"})
         if not self._same_origin():
             return self._json(403, {"error": "forbidden"})
@@ -899,6 +961,11 @@ class Handler(SimpleHTTPRequestHandler):
 
         if self.path == "/api/tts":
             return self._tts(str(body.get("text", ""))[:MAX_TTS_CHARS].strip())
+        if self.path == "/api/broadcast":
+            if isinstance(body.get("event"), dict):
+                HUB.publish(body["event"])
+            return self._json(200, {"ok": True, "viewers": len(HUB.subs)})
+
         agent = AGENT  # берём один раз: проект могут переключить посреди запроса
         if self.path == "/api/confirm":
             ok = agent.resolve_confirm(str(body.get("id", "")), body.get("approve") is True)

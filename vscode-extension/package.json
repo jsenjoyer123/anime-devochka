@@ -1,0 +1,45 @@
+{
+  "name": "aiko-chan",
+  "displayName": "Айко-тян",
+  "description": "3D AI-витубер, которая онбордит в проект прямо в боковой панели VS Code",
+  "version": "0.1.0",
+  "publisher": "anime-devochka",
+  "license": "MIT",
+  "engines": { "vscode": "^1.80.0" },
+  "categories": ["Other"],
+  "main": "./extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        { "id": "aiko", "title": "Айко-тян", "icon": "media/aiko.svg" }
+      ]
+    },
+    "views": {
+      "aiko": [
+        { "type": "webview", "id": "aiko.panel", "name": "Айко-тян" }
+      ]
+    },
+    "commands": [
+      { "command": "aiko.askSelection", "title": "Спросить Айко про выделенный код", "category": "Айко" },
+      { "command": "aiko.explainFile", "title": "Попросить Айко объяснить этот файл", "category": "Айко" },
+      { "command": "aiko.reload", "title": "Переподключиться к Айко", "category": "Айко" }
+    ],
+    "menus": {
+      "editor/context": [
+        { "command": "aiko.askSelection", "when": "editorHasSelection", "group": "navigation@100" },
+        { "command": "aiko.explainFile", "group": "navigation@101" }
+      ]
+    },
+    "configuration": {
+      "title": "Айко-тян",
+      "properties": {
+        "aiko.serverUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8765",
+          "description": "Адрес запущенного server.py"
+        }
+      }
+    }
+  }
+}

@@ -25,6 +25,29 @@ const TAG_RE = new RegExp(`\\[(happy|angry|sad|relaxed|surprised|neutral|${GESTU
 const isGesture = (tag) => GESTURE_NAMES.includes(tag);
 
 const $ = (id) => document.getElementById(id);
+
+// ?obs=1 — окно для OBS: прозрачный фон, без чата, повторяет основную вкладку
+// ?embed=vscode — внутри боковой панели VS Code
+const params = new URLSearchParams(location.search);
+const OBS = params.has("obs");
+const EMBED = params.get("embed");
+if (OBS) document.documentElement.classList.add("obs");
+if (EMBED) document.body.classList.add("embed");
+
+// основная вкладка пересылает зрителям (OBS) всё, что видно на сцене; если зрителей нет — молчит
+let viewers = 0;
+let viewersCheckedAt = -Infinity;
+function mirror(event) {
+  if (OBS) return;
+  const now = performance.now();
+  if (!viewers && now - viewersCheckedAt < 15000) return;
+  viewersCheckedAt = now;
+  fetch("/api/broadcast", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ event }),
+  }).then((r) => r.json()).then((d) => { viewers = d.viewers; }).catch(() => {});
+}
 const stage = $("stage");
 const canvas = $("scene");
 const chat = $("chat");
@@ -187,6 +210,7 @@ const baseEmotion = () => (mood > 0.4 ? "relaxed" : mood < -0.4 ? "sad" : "neutr
 /** Переодеться: с кружением, новый образ надевается, когда она стоит спиной. */
 function changeOutfit(next, animated = true) {
   outfit = next;
+  mirror({ t: "outfit", outfit: next, animated });
   $("outfit-name").textContent = next ? `· ${next.name}` : "";
   stage.dataset.bg = next?.background || "sakura";
   if (!vrm) return; // наденем сразу после загрузки модели
@@ -447,6 +471,7 @@ async function playNext(token) {
   playing = Boolean(item);
   if (!item) {
     state.talking = false;
+    mirror({ t: "quiet" });
     setTimeout(() => {
       if (state.talking) return;
       subtitles.textContent = "";
@@ -456,6 +481,7 @@ async function playNext(token) {
   }
   if (item.emotion) state.emotion = item.emotion;
   if (item.gesture) motion.play(item.gesture);
+  mirror({ t: "say", emotion: item.emotion, gesture: item.gesture, text: item.text });
   if (!item.text) {
     setTimeout(() => playNext(token), 600);
     return;
@@ -568,6 +594,7 @@ function setBusy(busy) {
   learnBtn.disabled = busy;
   for (const b of document.querySelectorAll("#actions button, #next")) b.disabled = busy;
   state.thinking = busy;
+  mirror({ t: "busy", on: busy });
   if (busy) {
     state.emotion = "relaxed";
     thinkingEl.textContent = "хмм…";
@@ -654,14 +681,17 @@ async function ask(payload) {
 function handleEvent(ev) {
   if (ev.type === "tool") {
     thinkingEl.textContent = ev.text;
+    mirror({ t: "thinking", text: ev.text });
     addMessage("tool", ev.text);
     narrate(ev);
   } else if (ev.type === "outfit") {
     if (ev.outfit) changeOutfit(ev.outfit);
   } else if (ev.type === "code") {
     showCode(ev);
+    mirror({ t: "code", ev });
   } else if (ev.type === "diagram") {
     showDiagram(ev);
+    mirror({ t: "diagram", ev });
   } else if (ev.type === "confirm") {
     askConfirm(ev);
   } else if (ev.type === "doc") {
@@ -771,7 +801,7 @@ if (navigator.mediaDevices?.getUserMedia && window.AudioWorkletNode) {
   };
 }
 
-let greeted = false;
+let greeted = OBS;
 async function refreshStatus() {
   try {
     const s = await (await fetch("/api/status")).json();
@@ -818,6 +848,7 @@ function wakeUp() {
   boredSpoken = false;
   if (!state.sleeping) return;
   state.sleeping = false;
+  mirror({ t: "sleep", on: false });
   stage.classList.remove("paused");
   thinkingEl.hidden = true;
   state.emotion = "surprised";
@@ -831,6 +862,7 @@ function wakeUp() {
 function fallAsleep() {
   if (state.sleeping || state.thinking || state.talking) return;
   state.sleeping = true;
+  mirror({ t: "sleep", on: true });
   stage.classList.add("paused");
   state.emotion = "relaxed";
   thinkingEl.textContent = "💤 Zzz…";
@@ -914,7 +946,9 @@ setInterval(() => {
   const idleFor = now - lastActivity;
   if (state.thinking || state.talking || state.sleeping || motion.busy) return;
 
-  if (idleFor > SLEEP_AFTER_MS) {
+  if (OBS) {
+    // зритель только оглядывается, а спит и болтает вслед за основной вкладкой
+  } else if (idleFor > SLEEP_AFTER_MS) {
     fallAsleep();
   } else if (idleFor > BORED_AFTER_MS && !boredSpoken && !sendBtn.disabled) {
     boredSpoken = true;
@@ -1004,6 +1038,52 @@ async function switchProject(path) {
     return;
   }
   location.reload(); // новая модель, образ и заметки — проще и чище начать страницу заново
+}
+
+// окно OBS: принимаем события основной вкладки
+if (OBS) {
+  const events = new EventSource("/api/events");
+  events.onmessage = (e) => {
+    const ev = JSON.parse(e.data);
+    if (ev.t === "say") {
+      if (ev.emotion) state.emotion = ev.emotion;
+      if (ev.gesture) motion.play(ev.gesture);
+      if (ev.text) {
+        subtitles.textContent = ev.text.replace(/`/g, "");
+        state.talking = true; // голос звучит в основной вкладке — тут рот двигается по имитации
+      }
+    } else if (ev.t === "quiet") {
+      state.talking = false;
+      setTimeout(() => { if (!state.talking) subtitles.textContent = ""; }, 2500);
+    } else if (ev.t === "busy") {
+      state.thinking = ev.on;
+      thinkingEl.textContent = "хмм…";
+      thinkingEl.hidden = !ev.on;
+    } else if (ev.t === "thinking") {
+      thinkingEl.textContent = ev.text;
+    } else if (ev.t === "code") {
+      showCode(ev.ev);
+    } else if (ev.t === "diagram") {
+      showDiagram(ev.ev);
+    } else if (ev.t === "outfit") {
+      changeOutfit(ev.outfit, ev.animated);
+    } else if (ev.t === "sleep") {
+      state.sleeping = ev.on;
+      thinkingEl.textContent = "💤 Zzz…";
+      thinkingEl.hidden = !ev.on;
+    }
+  };
+}
+
+// VS Code: расширение присылает выделенный код через postMessage родительского окна
+if (EMBED === "vscode") {
+  window.addEventListener("message", (e) => {
+    if (e.source !== window.parent || !String(e.origin).startsWith("vscode-webview://")) return;
+    const { type, text, label } = e.data || {};
+    if (type !== "aiko-ask" || typeof text !== "string" || sendBtn.disabled) return;
+    addMessage("user", label || text.slice(0, 200));
+    ask({ message: text.slice(0, 20000) });
+  });
 }
 
 decorateSeason();

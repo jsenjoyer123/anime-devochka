@@ -330,3 +330,14 @@ button.on { background: #e2336b; color: #fff; }
 }
 #project-menu button:hover { background: #ffe1ef; }
 #project-menu button.current { font-weight: 800; }
+
+/* ---------- окно для OBS: только Айко на прозрачном фоне ---------- */
+html.obs, html.obs body, html.obs #stage { background: transparent !important; }
+html.obs #panel, html.obs #drop-hint { display: none; }
+
+/* ---------- внутри VS Code: всё в колонку ---------- */
+body.embed { flex-direction: column; }
+body.embed #stage { flex: 0 0 46%; }
+body.embed #panel { width: 100%; flex: 1; min-height: 0; border-left: none; border-top: 2px solid #f6c3dc; }
+body.embed #screen { width: calc(100% - 32px); }
+body.embed #drop-hint { display: none; }
