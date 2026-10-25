@@ -194,6 +194,10 @@ class HttpTest(Base):
         self.assertEqual(self.post("/api/chat", {"message": "hi"}, {"Content-Type": "text/plain"})[0], 403)
         self.assertEqual(self.post("/api/confirm", {}, {"Host": "evil.com"})[0], 403)
 
+    def test_changes_endpoint(self):
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/changes", timeout=5) as r:
+            self.assertEqual(json.load(r)["git"], True)
+
     def test_switch_project(self):
         other = self.tmp / "other"
         other.mkdir()
