@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
 import { applyOutfit, removeOutfit } from "./outfit.js";
+import { Motion, idlePose, GESTURE_NAMES } from "./motion.js";
 
 // Если своей модели нет в web/models/aiko.vrm — берём пример из репозитория three-vrm
 const MODEL_URLS = [
@@ -11,12 +12,15 @@ const MODEL_URLS = [
 
 // --- бережём память и батарейку ---
 const MAX_FPS = 30;
+const SLEEP_FPS = 10;
 const MAX_PIXEL_RATIO = 1.25;
 const MAX_CHAT_MESSAGES = 150; // старые сообщения удаляем из DOM
 
 const EMOTIONS = ["happy", "angry", "sad", "relaxed", "surprised"];
 const EMOTION_WEIGHT = { happy: 0.8, angry: 0.7, sad: 0.7, relaxed: 0.6, surprised: 0.6 };
-const TAG_RE = /\[(happy|angry|sad|relaxed|surprised|neutral)\]/gi;
+// теги в ответе модели: эмоции ([happy]) и жесты ([wave]) — не озвучиваются и не показываются
+const TAG_RE = new RegExp(`\\[(happy|angry|sad|relaxed|surprised|neutral|${GESTURE_NAMES.join("|")})\\]`, "gi");
+const isGesture = (tag) => GESTURE_NAMES.includes(tag);
 
 const $ = (id) => document.getElementById(id);
 const stage = $("stage");
@@ -97,7 +101,8 @@ async function loadVRM(url) {
   holder.add(vrm.scene);
   if (vrm.lookAt) vrm.lookAt.target = lookTarget;
 
-  restPose();
+  motion.reset(idlePose(0, state));
+  motion.update(0, idlePose(0, state), bone);
   vrm.update(0);
   vrm.scene.updateMatrixWorld(true);
   if (outfit) applyOutfit(vrm, outfit);
@@ -156,7 +161,15 @@ const state = {
   blinkT: -1,
   spin: -1, // прогресс кружения при переодевании, -1 — не кружится
   spinApplied: false,
+  sleeping: false,
+  tilt: 0,          // наклон головы от реакций
+  closedEyes: 0,    // 0..1, прикрытые глаза (сон, «погладили»)
+  gaze: null,       // { pos, until } — куда она сейчас глянула сама
+  pointer: null,    // { pos, until } — курсор семпая, за которым следят глаза
+  eyesClosedUntil: 0,
 };
+
+const motion = new Motion();
 
 /** Переодеться: с кружением, новый образ надевается, когда она стоит спиной. */
 function changeOutfit(next, animated = true) {
@@ -170,7 +183,7 @@ function changeOutfit(next, animated = true) {
   state.spin = 0;
   state.spinApplied = false;
 }
-window.aiko = { changeOutfit }; // поиграться из консоли браузера
+window.aiko = { changeOutfit, play: (g) => motion.play(g) }; // поиграться из консоли браузера
 
 function updateSpin(dt) {
   if (state.spin < 0) return;
@@ -193,14 +206,6 @@ function bone(name) {
   return vrm?.humanoid.getNormalizedBoneNode(name);
 }
 
-function restPose() {
-  // из T-позы опускаем руки вдоль тела
-  bone("leftUpperArm")?.rotation.set(0, 0, -1.2);
-  bone("rightUpperArm")?.rotation.set(0, 0, 1.2);
-  bone("leftLowerArm")?.rotation.set(0, -0.2, 0);
-  bone("rightLowerArm")?.rotation.set(0, 0.2, 0);
-}
-
 const damp = (cur, target, k, dt) => cur + (target - cur) * (1 - Math.exp(-k * dt));
 
 function animate(t, dt) {
@@ -208,26 +213,19 @@ function animate(t, dt) {
   const em = vrm.expressionManager;
   updateSpin(dt);
 
-  // дыхание и покачивание
-  const chest = bone("chest") || bone("spine");
-  if (chest) chest.rotation.x = Math.sin(t * 1.6) * 0.015;
-  const spine = bone("spine");
-  if (spine) spine.rotation.z = Math.sin(t * 0.7) * 0.02;
-  const neck = bone("neck");
-  if (neck) {
-    const tilt = state.thinking ? 0.18 : 0;
-    neck.rotation.z = damp(neck.rotation.z, tilt + Math.sin(t * 0.9) * 0.04, 4, dt);
-    neck.rotation.y = Math.sin(t * 0.5) * 0.05 + (state.talking ? Math.sin(t * 2.3) * 0.04 : 0);
-    neck.rotation.x = state.talking ? Math.sin(t * 3.1) * 0.03 : 0;
-  }
-  bone("leftUpperArm")?.rotation.set(0, 0, -1.2 + Math.sin(t * 1.6) * 0.02);
-  bone("rightUpperArm")?.rotation.set(0, 0, 1.2 - Math.sin(t * 1.6) * 0.02);
+  // тело: поза покоя + жест
+  motion.update(dt, idlePose(t, state), bone);
+  holder.position.y = motion.hopOffset();
 
-  // куда смотрит
-  const look = state.thinking
-    ? new THREE.Vector3(0.6, camera.position.y + 0.5, camera.position.z)
-    : camera.position.clone().add(new THREE.Vector3(Math.sin(t * 0.4) * 0.1, 0, 0));
-  lookTarget.position.lerp(look, 1 - Math.exp(-3 * dt));
+  // куда смотрит: задумалась → вверх-в-сторону, иначе на курсор, на что-то своё или на зрителя
+  const now = performance.now();
+  let look;
+  if (state.thinking) look = new THREE.Vector3(0.6, camera.position.y + 0.5, camera.position.z);
+  else if (state.sleeping) look = new THREE.Vector3(0, cameraTarget.y - 0.6, camera.position.z);
+  else if (state.gaze && state.gaze.until > now) look = state.gaze.pos;
+  else if (state.pointer && state.pointer.until > now) look = state.pointer.pos;
+  else look = camera.position.clone().add(new THREE.Vector3(Math.sin(t * 0.4) * 0.1, 0, 0));
+  lookTarget.position.lerp(look, 1 - Math.exp(-4 * dt));
 
   if (!em) return;
 
@@ -249,7 +247,8 @@ function animate(t, dt) {
       state.nextBlink = t + 2 + Math.random() * 4;
     }
   }
-  em.setValue("blink", state.weights.happy > 0.4 ? 0 : blink);
+  state.closedEyes = damp(state.closedEyes, state.sleeping ? 1 : state.eyesClosedUntil > now ? 0.9 : 0, 5, dt);
+  em.setValue("blink", Math.max(state.closedEyes, state.weights.happy > 0.4 ? 0 : blink));
 
   // губы: по громкости голоса, а если его не слышно — имитация речи
   const level = voiceLevel();
@@ -269,7 +268,7 @@ let acc = 0;
 function loop() {
   requestAnimationFrame(loop);
   acc += clock.getDelta();
-  if (acc < 1 / MAX_FPS) return;
+  if (acc < 1 / (state.sleeping ? SLEEP_FPS : MAX_FPS)) return; // спящей хватит 10 FPS
   const dt = Math.min(acc, 0.1);
   acc = 0;
   animate(clock.elapsedTime, dt);
@@ -355,18 +354,28 @@ muteBtn.onclick = () => {
   }
 };
 
-function splitByEmotion(text) {
+/** Режет ответ на куски по тегам: у куска своя эмоция и, возможно, жест в начале. */
+function splitByTags(text) {
   const parts = [];
   let emotion = null;
+  let gesture = null;
   let last = 0;
+  const flush = (end) => {
+    if (end > last || gesture) parts.push({ emotion, gesture, text: text.slice(last, end) });
+    gesture = null;
+  };
   for (const m of text.matchAll(TAG_RE)) {
-    if (m.index > last) parts.push({ emotion, text: text.slice(last, m.index) });
-    emotion = m[1].toLowerCase();
+    const tag = m[1].toLowerCase();
+    if (m.index > last && text.slice(last, m.index).trim()) flush(m.index);
+    if (isGesture(tag)) gesture = tag;
+    else emotion = tag;
     last = m.index + m[0].length;
   }
-  parts.push({ emotion, text: text.slice(last) });
+  flush(text.length);
   return parts;
 }
+
+const stripTags = (text) => text.replace(TAG_RE, "").replace(/ {2,}/g, " ").trim();
 
 function forSpeech(text) {
   return text
@@ -380,16 +389,24 @@ function forSpeech(text) {
 /** Озвучивает ответ по предложениям, переключая эмоции по тегам. */
 function speak(text) {
   stopSpeaking();
-  for (const part of splitByEmotion(text)) {
-    const sentences = part.text.match(/[^.!?…\n]+[.!?…]*/g) || [];
-    let first = true;
-    for (const s of sentences) {
-      if (!s.trim()) continue;
-      queue.push({ emotion: first ? part.emotion : null, text: s.trim() });
-      first = false;
-    }
+  for (const part of splitByTags(text)) {
+    const sentences = (part.text.match(/[^.!?…\n]+[.!?…]*/g) || []).filter((s) => s.trim());
+    if (!sentences.length && part.gesture) sentences.push(""); // жест без слов
+    sentences.forEach((s, i) => {
+      queue.push({
+        emotion: i === 0 ? part.emotion : null,
+        gesture: i === 0 ? part.gesture : null,
+        text: s.trim(),
+      });
+    });
   }
   playNext(++speakToken);
+}
+
+/** Короткая реплика «между делом»: не перебивает, если она уже говорит. */
+function quip(text) {
+  if (state.talking || muted) return;
+  speak(text);
 }
 
 function stopSpeaking() {
@@ -408,7 +425,12 @@ async function playNext(token) {
     setTimeout(() => { if (!state.talking) subtitles.textContent = ""; }, 2500);
     return;
   }
-  if (item.emotion) state.emotion = item.emotion === "neutral" ? "neutral" : item.emotion;
+  if (item.emotion) state.emotion = item.emotion;
+  if (item.gesture) motion.play(item.gesture);
+  if (!item.text) {
+    setTimeout(() => playNext(token), 600);
+    return;
+  }
   subtitles.textContent = item.text.replace(/`/g, "");
   state.talking = true;
 
@@ -536,13 +558,16 @@ function handleEvent(ev) {
   if (ev.type === "tool") {
     thinkingEl.textContent = ev.text;
     addMessage("tool", ev.text);
+    narrate(ev);
   } else if (ev.type === "outfit") {
     if (ev.outfit) changeOutfit(ev.outfit);
   } else if (ev.type === "thought") {
-    addMessage("tool", ev.text.replace(TAG_RE, "").trim());
+    addMessage("tool", stripTags(ev.text));
+    lastNarration = performance.now();
+    quip(ev.text); // думает вслух
   } else if (ev.type === "reply") {
     setBusy(false);
-    addMessage("aiko", ev.text.replace(TAG_RE, "").trim());
+    addMessage("aiko", stripTags(ev.text));
     speak(ev.text);
     refreshStatus();
   } else if (ev.type === "error") {
@@ -599,9 +624,9 @@ async function refreshStatus() {
     if (!greeted) {
       greeted = true;
       const hello = s.has_notes
-        ? `[happy] С возвращением, семпай! Я помню проект ${s.project} по своим заметкам. Спрашивай что угодно!`
-        : `[happy] Привет, семпай! Я Айко, твоя новая коллега. [surprised] Проект ${s.project} я ещё не видела — нажми «Изучить проект», и я всё-всё разберу!`;
-      addMessage("aiko", hello.replace(TAG_RE, "").trim());
+        ? `[happy] [wave] С возвращением, семпай! Я помню проект ${s.project} по своим заметкам. Спрашивай что угодно!`
+        : `[happy] [wave] Привет, семпай! Я Айко, твоя новая коллега. [surprised] Проект ${s.project} я ещё не видела — нажми «Изучить проект», и я всё-всё разберу!`;
+      addMessage("aiko", stripTags(hello));
       // до первого клика браузер не даст ей заговорить — ждём его
       if (audioCtx) {
         speak(hello);
@@ -614,6 +639,140 @@ async function refreshStatus() {
     $("meta").textContent = "сервер не отвечает";
   }
 }
+
+// ============================================================
+// Живость: курсор, клики, скука, сон, перебивание, мысли вслух
+// ============================================================
+
+const BORED_AFTER_MS = 3 * 60_000; // столько молчания — и она заговорит сама
+const SLEEP_AFTER_MS = 8 * 60_000; // а потом уснёт
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+
+let lastActivity = performance.now();
+let boredSpoken = false;
+let lastNarration = 0;
+let lastPoke = 0;
+
+function wakeUp() {
+  lastActivity = performance.now();
+  boredSpoken = false;
+  if (!state.sleeping) return;
+  state.sleeping = false;
+  thinkingEl.hidden = true;
+  state.emotion = "surprised";
+  quip(pick([
+    "[surprised] [shake] А? Я не сплю! Я просто анализировала код с закрытыми глазами!",
+    "[surprised] Ой, семпай! Я на секундочку прикрыла глаза, честно-честно.",
+    "[relaxed] [stretch] Ммм... доброе утро, семпай. Что я пропустила?",
+  ]));
+}
+
+function fallAsleep() {
+  if (state.sleeping || state.thinking || state.talking) return;
+  state.sleeping = true;
+  state.emotion = "relaxed";
+  thinkingEl.textContent = "💤 Zzz…";
+  thinkingEl.hidden = false;
+}
+
+for (const ev of ["pointerdown", "keydown", "wheel"]) document.addEventListener(ev, wakeUp);
+
+// глаза следят за курсором: точка на плоскости чуть перед лицом
+const raycaster = new THREE.Raycaster();
+const ndc = new THREE.Vector2();
+stage.addEventListener("pointermove", (e) => {
+  const r = canvas.getBoundingClientRect();
+  ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+  const pos = raycaster.ray.at(Math.max(0.1, camera.position.z - 0.4), new THREE.Vector3());
+  state.pointer = { pos, until: performance.now() + 2500 };
+  lastActivity = performance.now();
+});
+
+// клик по ней: голова — погладить, тело — ткнуть
+canvas.addEventListener("pointerdown", (e) => {
+  if (!vrm || state.thinking) return;
+  const now = performance.now();
+  if (now - lastPoke < 1200) return;
+  const r = canvas.getBoundingClientRect();
+  ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+  const hit = raycaster.intersectObject(vrm.scene, true)[0];
+  if (!hit) return;
+  lastPoke = now;
+  const headY = vrm.humanoid.getNormalizedBoneNode("neck").getWorldPosition(new THREE.Vector3()).y;
+  if (hit.point.y > headY + 0.04) {
+    state.emotion = "happy";
+    state.eyesClosedUntil = now + 2200;
+    state.tilt = 0.15;
+    setTimeout(() => { state.tilt = 0; }, 2200);
+    quip(pick(["[happy] Э-хе-хе...", "[happy] [shy] Ну семпай, не при всех же...", "[relaxed] Мур... ещё чуть-чуть.", "[happy] Хи-хи, щекотно!"]));
+  } else {
+    state.emotion = "surprised";
+    quip(pick(["[surprised] Ай!", "[angry] [shake] Эй! Руки, семпай!", "[surprised] Чего тыкаешь?", "[angry] Я вообще-то работаю!"]));
+  }
+});
+
+// семпай начал печатать — замолкаем, как на стриме, когда чат перебивает
+input.addEventListener("keydown", () => {
+  if (state.talking && !state.thinking) stopSpeaking();
+});
+
+// мысли вслух, пока она копается в проекте (не чаще раза в 9 секунд)
+function narrate(ev) {
+  const now = performance.now();
+  if (now - lastNarration < 9000) return;
+  lastNarration = now;
+  const file = (ev.text.match(/читаю (.+)/) || [])[1];
+  let line;
+  if (file && /package\.json|pyproject|cargo\.toml|go\.mod|requirements/i.test(file)) {
+    line = pick(["[nod] Так, зависимости... посмотрим, на чём всё держится.", "[think] Ага, манифест. Сейчас узнаем стек!"]);
+  } else if (file && /readme/i.test(file)) {
+    line = pick(["[happy] О, README! Кто-то позаботился о новичках.", "[relaxed] Читаю README... ну хоть кто-то пишет документацию."]);
+  } else if (file && /test/i.test(file)) {
+    line = pick(["[happy] Тесты! Обожаю, когда есть тесты.", "[nod] Посмотрим, что тут проверяют."]);
+  } else if (ev.text.startsWith("ищу")) {
+    line = pick(["[think] Ищу-ищу...", "[think] Где же это...", "Хмм, давай поищем."]);
+  } else if (ev.text.startsWith("смотрю папку")) {
+    line = pick(["Так-так, что тут у нас...", "[think] Интересная структура.", "Ого, сколько папок."]);
+  } else if (file) {
+    line = pick(["Хмм...", "Интересненько.", "[nod] Понятно-понятно.", "[think] А вот это любопытно.", "Так, запоминаю."]);
+  } else {
+    return;
+  }
+  quip(line);
+}
+
+// спонтанное поведение: оглянуться, потянуться, заскучать, уснуть
+setInterval(() => {
+  if (!vrm || document.hidden) return;
+  const now = performance.now();
+  const idleFor = now - lastActivity;
+  if (state.thinking || state.talking || state.sleeping || motion.busy) return;
+
+  if (idleFor > SLEEP_AFTER_MS) {
+    fallAsleep();
+  } else if (idleFor > BORED_AFTER_MS && !boredSpoken && !sendBtn.disabled) {
+    boredSpoken = true;
+    ask({ action: "idle" });
+  } else if (Math.random() < 0.35) {
+    // мелкие движения, чтобы не стояла статуей
+    const r = Math.random();
+    if (r < 0.5) {
+      state.gaze = {
+        pos: new THREE.Vector3((Math.random() - 0.5) * 2, cameraTarget.y + (Math.random() - 0.3) * 0.6, camera.position.z),
+        until: now + 1200 + Math.random() * 1500,
+      };
+    } else if (r < 0.75) {
+      motion.play("nod");
+    } else if (r < 0.9) {
+      state.tilt = (Math.random() - 0.5) * 0.25;
+      setTimeout(() => { state.tilt = 0; }, 2000);
+    } else {
+      motion.play("stretch");
+    }
+  }
+}, 5000);
 
 loadDefaultModel();
 refreshStatus();
