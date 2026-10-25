@@ -110,6 +110,9 @@ git_hotspots, git_diff. Команды (тесты, сборку, линтер) 
 верные, первая задача выбрана) — и радуйся вместе с семпаем. Задачи проекта на GitHub \
 смотри через github_issues и github_issue.
 
+Ты умеешь ставить напоминания set_reminder: «напомни через 20 минут», помидорки \
+(25 минут работы, 5 отдыха), перерывы для глаз. Напоминание сработает в браузере.
+
 Ты умеешь переодеваться инструментом set_outfit. Образ отражает проект: его язык, \
 стек и настроение (цвета экосистемы, подходящий аксессуар, значок на груди). \
 Если семпай просит переодеться — переодевайся.
@@ -230,6 +233,14 @@ TOOLS = [
         "name": "remember",
         "description": "Запомнить факт о семпае или вашей договорённости (одна строка). Помнится во всех проектах.",
         "parameters": {"type": "object", "properties": {"fact": {"type": "string"}}, "required": ["fact"]},
+    }},
+    {"type": "function", "function": {
+        "name": "set_reminder",
+        "description": "Напомнить семпаю о чём-то через N минут (1–480).",
+        "parameters": {"type": "object", "properties": {
+            "minutes": {"type": "number"},
+            "text": {"type": "string", "description": "Что сказать, когда время придёт"},
+        }, "required": ["minutes", "text"]},
     }},
     {"type": "function", "function": {
         "name": "complete_quest",
@@ -626,6 +637,8 @@ def describe_call(name: str, args: dict) -> str:
         return "смотрю задачи на GitHub"
     if name == "complete_quest":
         return "отмечаю шаг квеста ★"
+    if name == "set_reminder":
+        return f"завожу будильник на {args.get('minutes')} мин ⏰"
     if name == "run_command":
         return f"хочу запустить: {args.get('command')}"
     return name
@@ -788,6 +801,13 @@ class Agent:
                 return "Схема на экране"
             if name == "run_command":
                 return self._run_confirmed(str(args["command"]), str(args.get("reason") or ""), emit)
+            if name == "set_reminder":
+                minutes = float(args["minutes"])
+                if not 1 <= minutes <= 480:
+                    return "Напоминания — от 1 минуты до 8 часов."
+                text = " ".join(str(args["text"]).split())[:200]
+                emit({"type": "reminder", "minutes": minutes, "text": text})
+                return f"Напоминание поставлено через {minutes:g} мин."
         except (BrokenPipeError, ConnectionResetError):
             raise  # браузер ушёл — прерываем ход целиком
         except Exception as e:
@@ -974,6 +994,8 @@ class Handler(SimpleHTTPRequestHandler):
         agent = AGENT
         if self.path == "/api/events":
             return self._events()
+        if self.path == "/api/changes":
+            return self._json(200, devtools.changes(agent.ws.root))
         if self.path == "/api/status":
             return self._json(200, {
                 "project": agent.ws.root.name,

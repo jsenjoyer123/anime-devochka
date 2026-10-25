@@ -3,6 +3,7 @@
 Всё с таймаутами и ограничением вывода — чтобы огромный лог не съел память.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -80,6 +81,18 @@ def git_diff(root: Path, staged: bool = False) -> str:
     # новые файлы в diff не попадают — показываем их списком из status
     status = _git(root, "status", "--short", "--untracked-files=all")
     return f"git status:\n{status}\n\n{_git(root, *args)}"
+
+
+def changes(root: Path) -> dict:
+    """Что поменялось в рабочей копии: подпись (чтобы заметить новые правки) и список файлов."""
+    status = _git(root, "status", "--porcelain=v1", "--untracked-files=normal")
+    if status.startswith(("Это не", "git ")):
+        return {"git": False, "sig": "", "files": []}
+    numstat = _git(root, "diff", "--numstat", "--no-ext-diff", "--no-textconv")
+    # _git срезает пробелы по краям, поэтому у первой строки может не быть ведущего пробела статуса
+    files = [line.split(maxsplit=1)[1] for line in status.splitlines() if len(line.split(maxsplit=1)) == 2]
+    sig = hashlib.sha1((status + numstat).encode()).hexdigest() if files else ""
+    return {"git": True, "sig": sig, "files": files[:50]}
 
 
 GITHUB_API = "https://api.github.com"

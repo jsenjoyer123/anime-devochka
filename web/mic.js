@@ -16,6 +16,22 @@ export class Ear {
   constructor({ onStart, onUtterance, sensitivity = () => 1 }) {
     Object.assign(this, { onStart, onUtterance, sensitivity });
     this.active = false;
+    this.vad = true;     // сама находит начало фразы; false — только push-to-talk
+    this.forced = false; // кнопку держат — пишем, пока не отпустят
+  }
+
+  /** Push-to-talk: начать запись прямо сейчас (с кусочком звука до нажатия). */
+  hold() {
+    if (!this.active || this.forced) return;
+    this.forced = true;
+    if (!this.recording) this.#begin(performance.now());
+  }
+
+  /** Кнопку отпустили — отправляем сказанное. */
+  release() {
+    if (!this.forced) return;
+    this.forced = false;
+    if (this.recording) this.#finish();
   }
 
   async start() {
@@ -45,6 +61,7 @@ export class Ear {
 
   #reset() {
     this.recording = false;
+    this.forced = false;
     this.chunks = [];
     this.preroll = [];
     this.loud = 0;
@@ -65,14 +82,7 @@ export class Ear {
       this.preroll.push(frame);
       while (this.preroll.length * 128 > this.rate * PREROLL_S) this.preroll.shift();
       this.loud = rms > threshold ? this.loud + frame.length : 0;
-      if (this.loud >= this.rate * START_AFTER_S) {
-        this.recording = true;
-        this.chunks = this.preroll;
-        this.samples = this.chunks.length * 128;
-        this.preroll = [];
-        this.lastVoice = now;
-        this.onStart?.();
-      }
+      if (this.vad && this.loud >= this.rate * START_AFTER_S) this.#begin(now);
       return;
     }
 
@@ -82,12 +92,23 @@ export class Ear {
       this.lastVoice = now;
       this.voiced += frame.length;
     }
-    if (now - this.lastVoice > STOP_AFTER_MS || this.samples > this.rate * MAX_UTTERANCE_S) {
-      const chunks = this.chunks;
-      const voiced = this.voiced;
-      this.#reset();
-      if (voiced >= this.rate * MIN_SPEECH_S) this.onUtterance?.(encodeWav(downsample(chunks, this.rate)));
-    }
+    const silent = !this.forced && now - this.lastVoice > STOP_AFTER_MS;
+    if (silent || this.samples > this.rate * MAX_UTTERANCE_S) this.#finish();
+  }
+
+  #begin(now) {
+    this.recording = true;
+    this.chunks = this.preroll;
+    this.samples = this.chunks.length * 128;
+    this.preroll = [];
+    this.lastVoice = now;
+    this.onStart?.();
+  }
+
+  #finish() {
+    const { chunks, voiced } = this;
+    this.#reset();
+    if (voiced >= this.rate * MIN_SPEECH_S) this.onUtterance?.(encodeWav(downsample(chunks, this.rate)));
   }
 }
 

@@ -264,6 +264,32 @@ class GithubTest(Base):
             urllib.request.urlopen = urlopen
 
 
+class ReminderAndWatchTest(Base):
+    def test_reminder_validated_and_emitted(self):
+        agent = server.Agent(self.ws, "key", "model")
+        agent._llm = scripted(
+            {"role": "assistant", "content": None, "tool_calls": [
+                tool_call("1", "set_reminder", minutes=0.1, text="рано"),
+                tool_call("2", "set_reminder", minutes=25, text="перерыв   для глаз")]},
+            {"role": "assistant", "content": "ок"},
+        )
+        events = []
+        agent.run("помидорка", events.append)
+        self.assertEqual([e for e in events if e["type"] == "reminder"],
+                         [{"type": "reminder", "minutes": 25.0, "text": "перерыв для глаз"}])
+
+    def test_changes_signature(self):
+        clean = devtools.changes(self.root)
+        self.assertEqual((clean["git"], clean["sig"]), (True, ""))
+        (self.root / "src" / "app.py").write_text("def main():\n    return 7\n", encoding="utf-8")
+        first = devtools.changes(self.root)
+        self.assertEqual(first["files"], ["src/app.py"])
+        (self.root / "new.py").write_text("x = 1\n", encoding="utf-8")
+        second = devtools.changes(self.root)
+        self.assertNotEqual(first["sig"], second["sig"])
+        self.assertIn("new.py", second["files"])
+
+
 class SeasonTest(unittest.TestCase):
     def test_seasons(self):
         from datetime import date

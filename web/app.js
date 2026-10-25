@@ -182,7 +182,7 @@ const state = {
   emotion: "neutral",
   talking: false,
   thinking: false,
-  mouth: 0,
+  visemes: { aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 },
   weights: Object.fromEntries(EMOTIONS.map((e) => [e, 0])),
   nextBlink: 2,
   blinkT: -1,
@@ -290,16 +290,21 @@ function animate(t, dt) {
   state.closedEyes = damp(state.closedEyes, state.sleeping ? 1 : state.eyesClosedUntil > now ? 0.9 : 0, 5, dt);
   em.setValue("blink", Math.max(state.closedEyes, state.weights.happy > 0.4 ? 0 : blink));
 
-  // губы: по громкости голоса, а если его не слышно — имитация речи
-  const level = voiceLevel();
-  const mouthTarget = level !== null
-    ? level
-    : state.talking
-      ? 0.15 + 0.6 * Math.abs(Math.sin(t * 13)) * (0.6 + 0.4 * Math.sin(t * 4.7))
-      : 0;
-  state.mouth = damp(state.mouth, mouthTarget, 18, dt);
-  em.setValue("aa", state.mouth);
-  em.setValue("oh", state.talking ? state.mouth * 0.3 * (1 + Math.sin(t * 7.1)) : 0);
+  // губы: форма гласной по спектру голоса, а если его не слышно — имитация речи
+  const shape = voiceShape() ?? (state.talking ? fakeShape(t) : null);
+  for (const v of VISEMES) {
+    state.visemes[v] = damp(state.visemes[v], shape ? shape[v] : 0, 20, dt);
+    em.setValue(v, state.visemes[v]);
+  }
+}
+
+const VISEMES = ["aa", "ih", "ou", "ee", "oh"];
+
+/** Когда звука нет (браузерный синтез, окно OBS), рот двигается по правдоподобному узору. */
+function fakeShape(t) {
+  const open = 0.15 + 0.6 * Math.abs(Math.sin(t * 13)) * (0.6 + 0.4 * Math.sin(t * 4.7));
+  const v = VISEMES[Math.floor(t * 7) % VISEMES.length];
+  return Object.fromEntries(VISEMES.map((x) => [x, x === v ? open : x === "aa" ? open * 0.3 : 0]));
 }
 
 // рендер-цикл с ограничением FPS; во скрытой вкладке браузер сам его останавливает
@@ -335,6 +340,7 @@ let audioUrl = null;
 let audioCtx = null;
 let analyser = null;
 let levelBuf = null;
+let freqBuf = null;
 
 // браузер разрешает звук только после первого действия пользователя
 document.addEventListener("pointerdown", () => {
@@ -342,6 +348,7 @@ document.addEventListener("pointerdown", () => {
   analyser = audioCtx.createAnalyser();
   analyser.fftSize = 512;
   levelBuf = new Uint8Array(analyser.fftSize);
+  freqBuf = new Uint8Array(analyser.frequencyBinCount);
   audioCtx.createMediaElementSource(audioEl).connect(analyser);
   analyser.connect(audioCtx.destination);
 }, { once: true });
@@ -353,6 +360,34 @@ function voiceLevel() {
   let sum = 0;
   for (const v of levelBuf) sum += ((v - 128) / 128) ** 2;
   return Math.min(1, Math.sqrt(sum / levelBuf.length) * 5);
+}
+
+/**
+ * Форма рта по спектру: грубая оценка гласной по энергии в полосах формант.
+ * Низкие частоты без высоких — «у/о», средние — «а», высокие — «и/э».
+ */
+function voiceShape() {
+  const level = voiceLevel();
+  if (level === null) return null;
+  analyser.getByteFrequencyData(freqBuf);
+  const hz = audioCtx.sampleRate / analyser.fftSize;
+  const band = (from, to) => {
+    let sum = 0;
+    const a = Math.floor(from / hz), b = Math.ceil(to / hz);
+    for (let i = a; i < b; i++) sum += freqBuf[i];
+    return sum / Math.max(1, b - a) / 255;
+  };
+  const low = band(250, 700), mid = band(700, 1400), high = band(1800, 3500);
+  const total = low + mid + high + 1e-6;
+  const [l, m, h] = [low / total, mid / total, high / total];
+  const open = Math.min(1, level * 1.2);
+  return {
+    aa: open * Math.min(1, m * 1.8),
+    oh: open * Math.max(0, l - h) * 1.2,
+    ou: open * Math.max(0, l - m) * 1.4,
+    ee: open * Math.max(0, h - l) * 1.6,
+    ih: open * Math.max(0, h - m) * 1.2,
+  };
 }
 
 function releaseAudio() {
@@ -592,7 +627,7 @@ function askConfirm(ev) {
 function setBusy(busy) {
   sendBtn.disabled = busy;
   learnBtn.disabled = busy;
-  for (const b of document.querySelectorAll("#actions button, #next")) b.disabled = busy;
+  for (const b of document.querySelectorAll("#actions button, #chips button")) b.disabled = busy;
   state.thinking = busy;
   mirror({ t: "busy", on: busy });
   if (busy) {
@@ -694,6 +729,8 @@ function handleEvent(ev) {
     mirror({ t: "diagram", ev });
   } else if (ev.type === "confirm") {
     askConfirm(ev);
+  } else if (ev.type === "reminder") {
+    addReminder(ev.minutes, ev.text);
   } else if (ev.type === "quest") {
     renderQuest(ev.quest);
     celebrate(`+${ev.gained} XP · ${ev.quest.level}`);
@@ -763,6 +800,9 @@ $("next").onclick = () => {
   ask({ message: "Дальше" });
 };
 
+let pttHeld = false;  // пробел зажат
+let pttOwned = false; // микрофон включён только на время push-to-talk
+
 // разговор голосом без кнопок: включил 🎤 — она слушает, сама понимает начало и конец фразы
 const ear = new Ear({
   // пока она говорит, порог выше: так её собственный голос из динамиков не считается речью семпая
@@ -791,20 +831,61 @@ const ear = new Ear({
 
 if (navigator.mediaDevices?.getUserMedia && window.AudioWorkletNode) {
   micBtn.hidden = false;
+  micBtn.title = "Клик — слушать всё время; пробел — держать и говорить";
   micBtn.onclick = async () => {
-    if (ear.active) {
+    if (ear.active && !pttOwned) {
       ear.stop();
       micBtn.classList.remove("on");
       return;
     }
     try {
-      await ear.start();
+      if (!ear.active) await ear.start();
+      ear.vad = true;
+      pttOwned = false;
       micBtn.classList.add("on");
       quip("[happy] Слушаю, семпай! Просто говори.");
     } catch (e) {
       addMessage("error", `Микрофон недоступен: ${e.message}`);
     }
   };
+
+  // push-to-talk: держишь пробел — она слушает, отпустил — фраза уходит
+  const typing = (el) => el?.closest?.("input, textarea, [contenteditable]");
+  document.addEventListener("keydown", async (e) => {
+    if (e.code !== "Space" || e.repeat || typing(e.target)) return;
+    e.preventDefault();
+    pttHeld = true;
+    if (!ear.active) {
+      try {
+        await ear.start();
+        ear.vad = false; // микрофон включили только ради push-to-talk — сам он не слушает
+        pttOwned = true;
+      } catch (err) {
+        pttHeld = false;
+        addMessage("error", `Микрофон недоступен: ${err.message}`);
+        return;
+      }
+    }
+    if (!pttHeld) return endPtt(); // пробел отпустили, пока включался микрофон
+    ear.hold();
+    thinkingEl.textContent = "🎙 говори, я слушаю…";
+    thinkingEl.hidden = false;
+  });
+  document.addEventListener("keyup", (e) => {
+    if (e.code === "Space" && pttHeld) {
+      pttHeld = false;
+      endPtt();
+    }
+  });
+}
+
+function endPtt() {
+  ear.release();
+  if (!state.thinking) thinkingEl.hidden = true;
+  if (pttOwned) {
+    ear.stop(); // запись уже отдана в onUtterance — микрофон можно выключить
+    pttOwned = false;
+  }
 }
 
 let greeted = OBS;
@@ -1002,6 +1083,88 @@ function decorateSeason(d = new Date()) {
     box.append(s);
   }
 }
+
+// ---------- напоминания: живут в localStorage, переживают перезагрузку страницы ----------
+const REMINDERS_KEY = "aiko-reminders";
+const loadReminders = () => {
+  try { return JSON.parse(localStorage.getItem(REMINDERS_KEY)) || []; } catch { return []; }
+};
+const saveReminders = (list) => localStorage.setItem(REMINDERS_KEY, JSON.stringify(list));
+const hhmm = (ms) => new Date(ms).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+
+function addReminder(minutes, text) {
+  const due = Date.now() + minutes * 60_000;
+  saveReminders([...loadReminders(), { due, text }]);
+  addMessage("tool", `⏰ напомню в ${hhmm(due)}: ${text}`);
+  // системное уведомление — на случай, если вкладка будет свёрнута
+  if ("Notification" in window && Notification.permission === "default") Notification.requestPermission();
+}
+
+function checkReminders() {
+  const now = Date.now();
+  const list = loadReminders();
+  const due = list.filter((r) => r.due <= now);
+  if (!due.length) return;
+  saveReminders(list.filter((r) => r.due > now));
+  for (const r of due) {
+    wakeUp();
+    addMessage("aiko", `⏰ ${r.text}`);
+    enqueueSpeech(`[surprised] [wave] Семпай! ${r.text}`); // не перебиваем, если она говорит
+    if (document.hidden && "Notification" in window && Notification.permission === "granted") {
+      new Notification("Айко-тян ⏰", { body: r.text });
+    }
+  }
+}
+if (!OBS) setInterval(checkReminders, 10_000);
+
+// ---------- 👀 режим наблюдения: заметить правки семпая и предложить ревью ----------
+const WATCH_EVERY_MS = 30_000;
+const OFFER_COOLDOWN_MS = 5 * 60_000;
+let watching = localStorage.getItem("aiko-watch") === "1";
+let lastSig = null;    // что уже видели
+let pendingSig = null; // новые правки ждут, пока «устоятся» (два опроса подряд без изменений)
+let lastOffer = -Infinity;
+
+function setWatching(on) {
+  watching = on;
+  localStorage.setItem("aiko-watch", on ? "1" : "0");
+  $("watch").classList.toggle("on", on);
+  lastSig = pendingSig = null;
+}
+$("watch").onclick = () => {
+  setWatching(!watching);
+  quip(watching ? "[nod] Буду поглядывать за твоими правками, семпай." : "[relaxed] Ладно, не подглядываю.");
+};
+setWatching(watching);
+
+async function pollChanges() {
+  if (!watching || OBS || document.hidden || state.thinking || state.sleeping) return;
+  let c;
+  try { c = await (await fetch("/api/changes")).json(); } catch { return; }
+  if (!c.git) {
+    setWatching(false);
+    addMessage("error", "Следить за правками умею только в git-проектах.");
+    return;
+  }
+  if (lastSig === null) { lastSig = c.sig; return; } // первый опрос — точка отсчёта
+  if (c.sig === lastSig) { pendingSig = null; return; }
+  if (c.sig !== pendingSig) { pendingSig = c.sig; return; }
+  lastSig = c.sig;
+  pendingSig = null;
+  if (!c.sig || performance.now() - lastOffer < OFFER_COOLDOWN_MS || sendBtn.disabled) return;
+  lastOffer = performance.now();
+  const more = c.files.length > 2 ? ` и ещё ${c.files.length - 2}` : "";
+  const names = c.files.slice(0, 2).map((f) => `\`${f}\``).join(", ") + more;
+  addMessage("aiko", `👀 Вижу правки: ${names}. Глянуть?`);
+  quip(`[think] О, семпай что-то поменял${c.files.length === 1 ? ` в ${c.files[0].split("/").pop()}` : ""}. Хочешь, гляну?`);
+  $("offer").hidden = false;
+}
+if (!OBS) setInterval(pollChanges, WATCH_EVERY_MS);
+$("offer").onclick = () => {
+  $("offer").hidden = true;
+  addMessage("user", ACTION_LABELS.review);
+  ask({ action: "review" });
+};
 
 // ---------- онбординг-квест ----------
 const questList = $("quest-list");
