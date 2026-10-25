@@ -66,6 +66,7 @@ ln -s "$PWD/vscode-extension" ~/.vscode/extensions/anime-devochka.aiko-chan-0.1.
   Модель — любой `.vrm` (VRoid Studio / VRoid Hub): положи в `web/models/aiko.vrm` или перетащи в окно.
   По умолчанию — sample-модель из репозитория three-vrm.
 - **Мозги:** OpenRouter, любая модель с tool calling (`OPENROUTER_MODEL` в `.env`).
+- **GitHub:** задачи читаются через REST API; для приватных репозиториев добавь `GITHUB_TOKEN` в `.env`.
 - **Голос:** [edge-tts](https://github.com/rany2/edge-tts) (онлайн, текст фраз уходит в Microsoft),
   липсинк по громкости. Распознавание речи — дешёвая аудио-модель OpenRouter (`AIKO_STT_MODEL`).
 - **Бэкенд:** Python 3.10+, единственная (необязательная) зависимость — edge-tts.

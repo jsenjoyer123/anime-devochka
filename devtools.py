@@ -1,13 +1,17 @@
 """
-Инструменты разработчика для Айко: git только на чтение и запуск команд (после подтверждения).
+Инструменты разработчика для Айко: git и GitHub только на чтение, запуск команд (после подтверждения).
 Всё с таймаутами и ограничением вывода — чтобы огромный лог не съел память.
 """
 
+import json
 import os
 import re
 import signal
 import subprocess
 import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections import Counter
 from pathlib import Path
 
@@ -76,6 +80,70 @@ def git_diff(root: Path, staged: bool = False) -> str:
     # новые файлы в diff не попадают — показываем их списком из status
     status = _git(root, "status", "--short", "--untracked-files=all")
     return f"git status:\n{status}\n\n{_git(root, *args)}"
+
+
+GITHUB_API = "https://api.github.com"
+GITHUB_REMOTE_RE = re.compile(r"github\.com[:/]([\w.-]+)/([\w.-]+?)(?:\.git)?/?$")
+
+
+def github_repo(root: Path) -> tuple[str, str] | None:
+    """owner/repo из адреса origin, если проект живёт на GitHub."""
+    url = _git(root, "remote", "get-url", "origin")
+    m = GITHUB_REMOTE_RE.search(url.strip())
+    return (m.group(1), m.group(2)) if m else None
+
+
+def _github(path: str) -> list | dict:
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "aiko-chan"}
+    if os.environ.get("GITHUB_TOKEN"):  # для приватных репозиториев и большего лимита запросов
+        headers["Authorization"] = f"Bearer {os.environ['GITHUB_TOKEN']}"
+    req = urllib.request.Request(GITHUB_API + path, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise RuntimeError("Репозиторий не найден (приватный? добавь GITHUB_TOKEN в .env)") from e
+        if e.code == 403:
+            raise RuntimeError("GitHub ограничил запросы — попробуй позже или добавь GITHUB_TOKEN") from e
+        raise RuntimeError(f"GitHub HTTP {e.code}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"GitHub недоступен (нет интернета?): {e.reason}") from e
+
+
+def github_issues(root: Path, label: str | None = None, limit: int = 15) -> str:
+    repo = github_repo(root)
+    if not repo:
+        return "У проекта нет origin на GitHub."
+    limit = max(1, min(int(limit), 30))
+    # PR приходят в том же списке и могут занять всю страницу — берём с запасом и фильтруем
+    query = {"state": "open", "per_page": "100", "sort": "updated"}
+    if label:
+        query["labels"] = label
+    items = _github(f"/repos/{repo[0]}/{repo[1]}/issues?" + urllib.parse.urlencode(query))
+    lines = []
+    for it in items:
+        if "pull_request" in it:
+            continue  # GitHub отдаёт PR в том же списке
+        labels = ", ".join(lb["name"] for lb in it.get("labels", []))
+        body = " ".join((it.get("body") or "").split())[:200]
+        lines.append(f"#{it['number']} {it['title']} [{labels}] 💬{it.get('comments', 0)}\n    {body}")
+        if len(lines) >= limit:
+            break
+    return f"{repo[0]}/{repo[1]}, открытые задачи:\n" + "\n".join(lines) if lines else "Открытых задач не нашлось."
+
+
+def github_issue(root: Path, number: int) -> str:
+    repo = github_repo(root)
+    if not repo:
+        return "У проекта нет origin на GitHub."
+    base = f"/repos/{repo[0]}/{repo[1]}/issues/{int(number)}"
+    it = _github(base)
+    out = [f"#{it['number']} {it['title']} ({it['state']})", (it.get("body") or "")[:4000]]
+    if it.get("comments"):
+        for c in _github(base + "/comments?per_page=5"):
+            out.append(f"— {c['user']['login']}: {(c.get('body') or '')[:800]}")
+    return "\n\n".join(out)
 
 
 def run_command(root: Path, command: str) -> str:

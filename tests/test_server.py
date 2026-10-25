@@ -200,6 +200,70 @@ class HttpTest(Base):
         self.assertEqual(server.recent_projects()[:2], [str(other), str(self.root)])
 
 
+class QuestAndMemoryTest(Base):
+    def test_auto_quest_and_event(self):
+        agent = server.Agent(self.ws, "key", "model")
+        agent._llm = scripted(
+            {"role": "assistant", "content": None, "tool_calls": [tool_call("1", "write_notes", content="# x")]},
+            {"role": "assistant", "content": "[happy] изучила!"},
+        )
+        events = []
+        agent.run("[learn]", events.append, label="[learn]")
+        quest = [e for e in events if e["type"] == "quest"]
+        self.assertEqual(quest[0]["gained"], 30)
+        self.assertEqual(self.ws.quest.state()["level"], "Новичок")
+        self.assertIn("уже был", self.ws.complete_quest("learn"))
+        self.assertIn("Нет такого шага", self.ws.call("complete_quest", {"step": "hack"}))
+
+    def test_transcript_survives_restart(self):
+        agent = server.Agent(self.ws, "key", "model")
+        agent._llm = scripted({"role": "assistant", "content": "привет, семпай"})
+        agent.run("привет", lambda ev: None)
+        agent._llm = scripted({"role": "assistant", "content": "скучно"})
+        agent.run("(служебное)", lambda ev: None, label="[idle]")
+        again = server.Agent(self.ws, "key", "model")  # «перезапуск сервера»
+        self.assertEqual([m["content"] for m in again.transcript], ["привет", "привет, семпай", "скучно"])
+        self.assertEqual(again.history[0], {"role": "user", "content": "привет"})
+
+    def test_github_remote_parsing(self):
+        git = ["git", "-C", str(self.root)]
+        self.assertIsNone(devtools.github_repo(self.root))
+        subprocess.run([*git, "remote", "add", "origin", "git@github.com:aiko/chan.git"], check=True)
+        self.assertEqual(devtools.github_repo(self.root), ("aiko", "chan"))
+        subprocess.run([*git, "remote", "set-url", "origin", "https://github.com/a-b/c.d/"], check=True)
+        self.assertEqual(devtools.github_repo(self.root), ("a-b", "c.d"))
+
+
+class GithubTest(Base):
+    def setUp(self):
+        super().setUp()
+        subprocess.run(["git", "-C", str(self.root), "remote", "add", "origin", "https://github.com/a/b"], check=True)
+        self._github = devtools._github
+
+    def tearDown(self):
+        devtools._github = self._github
+        super().tearDown()
+
+    def test_issues_skip_pull_requests(self):
+        pr = {"number": 1, "title": "bump", "pull_request": {}}
+        issue = {"number": 2, "title": "Опечатка в README", "labels": [{"name": "good first issue"}], "body": "x"}
+        devtools._github = lambda path: [pr] * 50 + [issue] * 5
+        out = devtools.github_issues(self.root, limit=2)
+        self.assertNotIn("bump", out)
+        self.assertEqual(out.count("Опечатка"), 2)
+
+    def test_offline_is_reported(self):
+        def offline(path):
+            raise urllib.error.URLError("no network")
+        urlopen = urllib.request.urlopen
+        urllib.request.urlopen = lambda *a, **k: offline(None)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "недоступен"):
+                self._github("/repos/a/b/issues")
+        finally:
+            urllib.request.urlopen = urlopen
+
+
 class SeasonTest(unittest.TestCase):
     def test_seasons(self):
         from datetime import date

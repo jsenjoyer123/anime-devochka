@@ -341,3 +341,55 @@ body.embed #stage { flex: 0 0 46%; }
 body.embed #panel { width: 100%; flex: 1; min-height: 0; border-left: none; border-top: 2px solid #f6c3dc; }
 body.embed #screen { width: calc(100% - 32px); }
 body.embed #drop-hint { display: none; }
+
+/* ---------- онбординг-квест ---------- */
+#quest-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 12px 0;
+  padding: 6px 10px;
+  font-size: 12px;
+  background: #f3edff;
+}
+#quest-bar[hidden], #quest-list[hidden] { display: none; }
+#quest-level { font-weight: 800; white-space: nowrap; }
+#quest-bar .bar { flex: 1; height: 8px; border-radius: 99px; background: #e2d8ff; overflow: hidden; }
+#quest-fill { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #ff9cc9, #9f7bff); transition: width .8s; }
+#quest-xp { opacity: .7; white-space: nowrap; }
+#quest-list { margin: 6px 12px 0; padding: 8px 12px 8px 30px; border-radius: 12px; background: #faf7ff; font-size: 13px; }
+#quest-list li { margin: 3px 0; }
+#quest-list li.done { opacity: .55; text-decoration: line-through; }
+#quest-list li span { float: right; opacity: .6; font-size: 11px; }
+#actions { flex-wrap: wrap; }
+#actions button { flex: 1 1 30%; }
+
+/* тост «+40 XP» и конфетти */
+#toast {
+  position: absolute;
+  top: 70px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 10px 18px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #ff9cc9, #9f7bff);
+  color: #fff;
+  font-weight: 800;
+  box-shadow: 0 6px 20px rgba(160, 80, 200, .35);
+  animation: pop .5s ease-out;
+  z-index: 3;
+}
+#toast[hidden] { display: none; }
+@keyframes pop { from { transform: translateX(-50%) scale(.6); opacity: 0; } }
+.confetti {
+  position: absolute;
+  top: 40%;
+  left: 50%;
+  font-size: 22px;
+  pointer-events: none;
+  animation: burst 1.6s ease-out forwards;
+  z-index: 3;
+}
+@keyframes burst {
+  to { transform: translate(var(--dx), var(--dy)) rotate(var(--rot)); opacity: 0; }
+}

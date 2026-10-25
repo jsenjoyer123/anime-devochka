@@ -694,6 +694,10 @@ function handleEvent(ev) {
     mirror({ t: "diagram", ev });
   } else if (ev.type === "confirm") {
     askConfirm(ev);
+  } else if (ev.type === "quest") {
+    renderQuest(ev.quest);
+    celebrate(`+${ev.gained} XP · ${ev.quest.level}`);
+    mirror({ t: "celebrate", text: `+${ev.gained} XP` });
   } else if (ev.type === "doc") {
     const div = addMessage("aiko", "ONBOARDING.md готов: ");
     div.append(Object.assign(document.createElement("a"), { href: ev.url, textContent: "скачать", download: "ONBOARDING.md" }));
@@ -741,6 +745,8 @@ const ACTION_LABELS = {
   tour: "Айко, проведи экскурсию по коду 🗺",
   review: "Айко, посмотри мои изменения 🔍",
   doc: "Айко, напиши ONBOARDING.md для команды 📄",
+  first_task: "Айко, помоги выбрать первую задачу 🎯",
+  quiz: "Айко, устрой мне экзамен по проекту 🎓",
 };
 for (const btn of document.querySelectorAll("#actions button")) {
   btn.onclick = () => {
@@ -811,8 +817,11 @@ async function refreshStatus() {
     if (s.outfit && !outfit) changeOutfit(s.outfit, false);
     learnBtn.hidden = false;
     learnBtn.textContent = s.has_notes ? "🔄 Переизучить проект" : "✨ Изучить проект";
+    renderQuest(s.quest);
     if (!greeted) {
       greeted = true;
+      // чат с прошлого раза: сервер помнит последние реплики
+      for (const m of s.transcript || []) addMessage(m.role === "user" ? "user" : "aiko", stripTags(m.content));
       const hello = s.has_notes
         ? `[happy] [wave] С возвращением, семпай! Я помню проект ${s.project} по своим заметкам. Спрашивай что угодно!`
         : `[happy] [wave] Привет, семпай! Я Айко, твоя новая коллега. [surprised] Проект ${s.project} я ещё не видела — нажми «Изучить проект», и я всё-всё разберу!`;
@@ -994,6 +1003,48 @@ function decorateSeason(d = new Date()) {
   }
 }
 
+// ---------- онбординг-квест ----------
+const questList = $("quest-list");
+$("quest-bar").onclick = () => { questList.hidden = !questList.hidden; };
+
+function renderQuest(q) {
+  if (!q || OBS) return;
+  $("quest-bar").hidden = false;
+  $("quest-level").textContent = `★ ${q.level}`;
+  $("quest-xp").textContent = q.next_level_xp ? `${q.xp} / ${q.next_level_xp} XP` : `${q.xp} XP`;
+  $("quest-fill").style.width = `${Math.round((q.xp / q.max_xp) * 100)}%`;
+  questList.replaceChildren(...q.steps.map((st) => {
+    const li = document.createElement("li");
+    li.className = st.done ? "done" : "";
+    li.textContent = `${st.done ? "✅" : "⬜"} ${st.title}`;
+    const xp = document.createElement("span");
+    xp.textContent = `${st.xp} XP`;
+    li.append(xp);
+    return li;
+  }));
+}
+
+/** Тост и конфетти; Айко подпрыгивает от радости. */
+function celebrate(text) {
+  const toast = $("toast");
+  toast.textContent = `🎉 ${text}`;
+  toast.hidden = false;
+  clearTimeout(celebrate.timer);
+  celebrate.timer = setTimeout(() => { toast.hidden = true; }, 3500);
+  for (let i = 0; i < 18; i++) {
+    const c = document.createElement("span");
+    c.className = "confetti";
+    c.textContent = pick(["🎉", "✨", "⭐", "💖", "🌸"]);
+    const angle = Math.random() * Math.PI * 2;
+    const dist = 120 + Math.random() * 220;
+    c.style.cssText = `--dx:${Math.cos(angle) * dist}px;--dy:${Math.sin(angle) * dist}px;--rot:${Math.random() * 720 - 360}deg`;
+    stage.append(c);
+    setTimeout(() => c.remove(), 1700);
+  }
+  motion.play("hop");
+  shiftMood(0.1);
+}
+
 /** Похвала и грубость влияют на настроение (а модель узнаёт о нём из mood). */
 function reactToWords(text) {
   if (/молодец|умниц|спасибо|класс|супер|обожаю|люблю|хорошая|лучшая|thank/i.test(text)) shiftMood(0.1);
@@ -1067,6 +1118,8 @@ if (OBS) {
       showDiagram(ev.ev);
     } else if (ev.t === "outfit") {
       changeOutfit(ev.outfit, ev.animated);
+    } else if (ev.t === "celebrate") {
+      celebrate(ev.text);
     } else if (ev.t === "sleep") {
       state.sleeping = ev.on;
       thinkingEl.textContent = "💤 Zzz…";

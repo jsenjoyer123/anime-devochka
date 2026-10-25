@@ -24,6 +24,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import devtools
+from quest import STEP_IDS, Quest
 
 try:  # голос: нейросетевой TTS Microsoft Edge (онлайн, локально ничего не грузит)
     import edge_tts
@@ -37,6 +38,7 @@ SENPAI_PATH = NOTES_DIR / "_senpai.md"      # что Айко помнит о с
 RECENT_PATH = NOTES_DIR / "_projects.json"  # недавние проекты для переключателя
 MAX_SENPAI_LINES = 60
 MAX_RECENT = 10
+MAX_SAVED_CHAT = 30  # столько реплик диалога помним между перезапусками сервера
 
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "deepseek/deepseek-v4.1-flash-1017"
@@ -103,6 +105,11 @@ git_hotspots, git_diff. Команды (тесты, сборку, линтер) 
 Запоминай важное о семпае инструментом remember: имя, роль, стек, что любит и не любит, \
 о чём договорились. Это общая память на все проекты — не записывай туда код и секреты.
 
+У семпая есть онбординг-квест. Отмечай шаги инструментом complete_quest, только когда \
+шаг действительно сделан (экскурсия дошла до конца, команда прошла успешно, ответы на экзамене \
+верные, первая задача выбрана) — и радуйся вместе с семпаем. Задачи проекта на GitHub \
+смотри через github_issues и github_issue.
+
 Ты умеешь переодеваться инструментом set_outfit. Образ отражает проект: его язык, \
 стек и настроение (цвета экосистемы, подходящий аксессуар, значок на груди). \
 Если семпай просит переодеться — переодевайся.
@@ -130,6 +137,19 @@ DOC_TASK = """Составь для новых людей в команде до
 со схемой Mermaid, ключевые файлы, как устроен типичный сценарий, соглашения, подводные камни, \
 к кому/куда идти с вопросами. Опирайся на заметки и проверяй факты инструментами. \
 Сохрани через write_onboarding_doc и коротко скажи семпаю, что готово."""
+
+FIRST_TASK = """Семпай хочет выбрать первую задачу в проекте. Посмотри github_issues \
+(сначала с label "good first issue", потом "help wanted", потом все). Выбери 2–3 задачи, \
+подходящие новичку, и коротко объясни выбор. Для лучшей: прочитай её через github_issue, найди \
+связанный код (search, read_file) и покажи главное место через show_code, предложи план из 3–4 шагов. \
+Если GitHub недоступен или задач нет — найди в коде TODO/FIXME и мелкие улучшения и предложи их. \
+Когда семпай выберет задачу — отметь шаг квеста first_task."""
+
+QUIZ_TASK = """Устрой семпаю экзамен по проекту: 5 вопросов от простого к сложному \
+(назначение проекта, запуск, архитектура, конкретный модуль, «что будет, если…»). \
+Вопросы — по своим заметкам, ответы сверяй с кодом. Задавай ПО ОДНОМУ вопросу за ответ и жди ответа; \
+на ответ реагируй живо, поправляй ошибки. В конце скажи счёт; если верных 3 и больше — \
+отметь шаг квеста quiz и устрой праздник [cheer]. Начинай с первого вопроса."""
 
 ACCESSORIES = ["none", "glasses", "cap", "headphones", "cat_ears", "hard_hat", "beret", "bow",
                "witch_hat", "santa_hat"]
@@ -210,6 +230,26 @@ TOOLS = [
         "name": "remember",
         "description": "Запомнить факт о семпае или вашей договорённости (одна строка). Помнится во всех проектах.",
         "parameters": {"type": "object", "properties": {"fact": {"type": "string"}}, "required": ["fact"]},
+    }},
+    {"type": "function", "function": {
+        "name": "complete_quest",
+        "description": "Отметить выполненный шаг онбординг-квеста семпая.",
+        "parameters": {"type": "object", "properties": {
+            "step": {"type": "string", "enum": STEP_IDS},
+        }, "required": ["step"]},
+    }},
+    {"type": "function", "function": {
+        "name": "github_issues",
+        "description": "Открытые задачи проекта на GitHub (только чтение).",
+        "parameters": {"type": "object", "properties": {
+            "label": {"type": "string", "description": "Например good first issue, help wanted, bug"},
+            "limit": {"type": "integer", "default": 15},
+        }},
+    }},
+    {"type": "function", "function": {
+        "name": "github_issue",
+        "description": "Задача на GitHub целиком: описание и первые комментарии.",
+        "parameters": {"type": "object", "properties": {"number": {"type": "integer"}}, "required": ["number"]},
     }},
     {"type": "function", "function": {
         "name": "git_log",
@@ -353,6 +393,8 @@ class Workspace:
         self.notes_path = notes_path
         self.outfit_path = notes_path.with_suffix(".outfit.json")
         self.onboarding_path = notes_path.with_suffix(".ONBOARDING.md")
+        self.chat_path = notes_path.with_suffix(".chat.json")
+        self.quest = Quest(notes_path.with_suffix(".quest.json"))
 
     def _resolve(self, rel: str) -> Path:
         p = (self.root / rel).resolve()
@@ -530,12 +572,26 @@ class Workspace:
     def git_diff(self, staged: bool = False) -> str:
         return devtools.git_diff(self.root, bool(staged))
 
+    def github_issues(self, label: str | None = None, limit: int = 15) -> str:
+        return devtools.github_issues(self.root, label, limit)
+
+    def github_issue(self, number: int) -> str:
+        return devtools.github_issue(self.root, number)
+
+    def complete_quest(self, step: str) -> str:
+        first = self.quest.complete(step)
+        st = self.quest.state()
+        return (f"Шаг отмечен! Теперь {st['xp']} XP, уровень «{st['level']}»." if first
+                else "Этот шаг уже был выполнен раньше.")
+
     def call(self, name: str, args: dict) -> str:
         fn = {"list_dir": self.list_dir, "read_file": self.read_file, "search": self.search,
               "write_notes": self.write_notes, "set_outfit": self.set_outfit,
               "write_onboarding_doc": self.write_onboarding_doc, "remember": self.remember,
               "git_log": self.git_log, "git_show": self.git_show, "git_blame": self.git_blame,
-              "git_hotspots": self.git_hotspots, "git_diff": self.git_diff}.get(name)
+              "git_hotspots": self.git_hotspots, "git_diff": self.git_diff,
+              "github_issues": self.github_issues, "github_issue": self.github_issue,
+              "complete_quest": self.complete_quest}.get(name)
         if fn is None:
             return f"Неизвестный инструмент: {name}"
         try:
@@ -566,6 +622,10 @@ def describe_call(name: str, args: dict) -> str:
         return "пишу ONBOARDING.md ✎"
     if name == "remember":
         return "запоминаю про семпая ♡"
+    if name.startswith("github_"):
+        return "смотрю задачи на GitHub"
+    if name == "complete_quest":
+        return "отмечаю шаг квеста ★"
     if name == "run_command":
         return f"хочу запустить: {args.get('command')}"
     return name
@@ -580,11 +640,16 @@ class Agent:
         self.lock = threading.Lock()  # один ответ за раз
         self.pending: dict[str, dict] = {}  # запросы на запуск команд: id → {event, approved}
         self.mood = 0.0  # -1 обижена … +1 счастлива; присылает браузер
+        if ws.notes_path.is_file():
+            ws.quest.complete("learn")  # проект изучали до появления квеста — засчитываем
+        self.transcript: list[dict] = self._load_transcript()  # то, что видно в чате
+        self.history = [{"role": m["role"], "content": m["content"]} for m in self.transcript if m.get("content")]
 
     def system_prompt(self) -> str:
         s = PERSONA + f"\nКорень проекта: {self.ws.root.name} (все пути относительно него).\n"
         s += f"Сегодня {datetime.date.today():%d.%m.%Y}{season_hint()}.\n"
         s += mood_hint(self.mood)
+        s += self.ws.quest.prompt_hint()
         if SENPAI_PATH.is_file():
             s += "\nЧто ты помнишь о семпае:\n" + SENPAI_PATH.read_text(encoding="utf-8")
         if self.ws.notes_path.is_file():
@@ -641,13 +706,39 @@ class Agent:
             cut = next((i for i in users if i >= len(self.history) - MAX_HISTORY), users[-1])
             del self.history[:cut]
 
-    def run(self, user_text: str, emit) -> None:
-        """Один ход агента. emit(dict) отправляет события в браузер."""
+    def run(self, user_text: str, emit, label: str | None = None) -> None:
+        """Один ход агента. emit(dict) отправляет события в браузер;
+        label — как показать реплику семпая в сохранённом чате (для служебных заданий)."""
+        reply: list[str] = []
+
+        def capture(ev: dict) -> None:
+            if ev.get("type") == "reply":
+                reply.append(ev.get("text") or "")
+            emit(ev)
+
         try:
-            self._run(user_text, emit)
+            self._run(user_text, capture)
         except BaseException:
             self._repair_history()
             raise
+        finally:
+            if reply:
+                self._save_turn(label or user_text, reply[0], internal=label is not None)
+
+    def _load_transcript(self) -> list[dict]:
+        try:
+            return json.loads(self.ws.chat_path.read_text(encoding="utf-8"))[-MAX_SAVED_CHAT:]
+        except (OSError, json.JSONDecodeError):
+            return []
+
+    def _save_turn(self, user_text: str, reply: str, internal: bool) -> None:
+        """Сохраняем только текст реплик — без вызовов инструментов, их результаты устаревают."""
+        if not internal:
+            self.transcript.append({"role": "user", "content": user_text})
+        self.transcript.append({"role": "assistant", "content": reply})
+        self.transcript = self.transcript[-MAX_SAVED_CHAT:]
+        self.ws.chat_path.parent.mkdir(parents=True, exist_ok=True)
+        self.ws.chat_path.write_text(json.dumps(self.transcript, ensure_ascii=False, indent=1), encoding="utf-8")
 
     def _repair_history(self) -> None:
         """Ход оборвался посреди вызова инструментов: убираем вызовы без результатов,
@@ -702,11 +793,19 @@ class Agent:
         except Exception as e:
             return f"Ошибка: {type(e).__name__}: {e}"
 
+        before = self.ws.quest.state()["xp"]
         result = self.ws.call(name, args)
         if name == "set_outfit":
             emit({"type": "outfit", "outfit": self.ws.outfit()})
         elif name == "write_onboarding_doc":
             emit({"type": "doc", "url": "/api/onboarding"})
+        # некоторые шаги квеста засчитываются сами
+        auto = {"write_notes": "learn", "write_onboarding_doc": "doc"}.get(name)
+        if auto and not result.startswith("Ошибка"):
+            self.ws.quest.complete(auto)
+        state = self.ws.quest.state()
+        if state["xp"] > before:
+            emit({"type": "quest", "quest": state, "gained": state["xp"] - before})
         return result
 
     def _run_confirmed(self, command: str, reason: str, emit) -> str:
@@ -886,6 +985,8 @@ class Handler(SimpleHTTPRequestHandler):
                 "outfit": agent.ws.outfit(),
                 "has_doc": agent.ws.onboarding_path.is_file(),
                 "model_url": project_model_url(agent.ws.root.name),
+                "quest": agent.ws.quest.state(),
+                "transcript": agent.transcript,
             })
         if self.path == "/api/onboarding":
             return self._onboarding(agent)
@@ -980,9 +1081,11 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json(409, {"error": str(e)})
             return self._json(200, {"ok": True, "project": root.name})
 
-        actions = {"learn": LEARN_TASK, "idle": IDLE_TASK, "tour": TOUR_TASK,
-                   "review": REVIEW_TASK, "doc": DOC_TASK}
-        text = actions.get(body.get("action")) or str(body.get("message", "")).strip()
+        actions = {"learn": LEARN_TASK, "idle": IDLE_TASK, "tour": TOUR_TASK, "review": REVIEW_TASK,
+                   "doc": DOC_TASK, "first_task": FIRST_TASK, "quiz": QUIZ_TASK}
+        action = body.get("action")
+        text = actions.get(action) or str(body.get("message", "")).strip()
+        label = f"[{action}]" if action in actions else None
         if not text:
             return self._json(400, {"error": "пустое сообщение"})
         try:
@@ -1003,7 +1106,7 @@ class Handler(SimpleHTTPRequestHandler):
             self.wfile.flush()
 
         try:
-            agent.run(text, emit)
+            agent.run(text, emit, label)
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as e:
