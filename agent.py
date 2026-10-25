@@ -23,6 +23,7 @@ MAX_SAVED_CHAT = 30         # столько реплик диалога пом�
 CONFIRM_TIMEOUT = 300       # сколько ждём, пока семпай нажмёт «разрешить»
 EDITOR_FRESH_SEC = 15 * 60  # контекст редактора старше этого считаем устаревшим
 MAX_EDITOR_SELECTION = 4_000
+MAX_SUMMARY_CHARS = 2_500   # резюме старого разговора в системном промпте
 
 PERSONA = """Ты — Айко-тян, AI-витубер в стиле Neuro-sama: милая, остроумная, чуть дерзкая \
 аниме-девочка с 3D-аватаром. Ты только что пришла в команду junior-разработчицей и проходишь \
@@ -428,6 +429,9 @@ class Agent:
         s += self.ws.quest.prompt_hint()
         if workspace.SENPAI_PATH.is_file():
             s += "\nЧто ты помнишь о семпае:\n" + workspace.SENPAI_PATH.read_text(encoding="utf-8")
+        if self.ws.summary_path.is_file():
+            s += ("\nО чём вы говорили раньше (твоё резюме старой части разговора):\n"
+                  + self.ws.summary_path.read_text(encoding="utf-8")[:MAX_SUMMARY_CHARS] + "\n")
         if memory := self.ws.project_memory():
             s += "\nДоговорённости и поправки в этом проекте (важнее заметок, если они расходятся):\n" + memory
         s += self.editor_hint()
@@ -528,10 +532,49 @@ class Agent:
                 self.history[i]["content"] = c[:300] + "\n... (старый результат сжат)"
         if len(self.history) > MAX_HISTORY:
             # режем только по границе сообщения пользователя, чтобы не разорвать пару tool_call/tool;
-            # текущий ход не трогаем — его результаты уже сжаты выше
+            # текущий ход не трогаем — его результаты уже сжаты выше. Режем сразу до половины:
+            # отрезанное сжимается в резюме отдельным запросом, и делать его каждый ход незачем
             users = [i for i, m in enumerate(self.history) if m["role"] == "user"]
-            cut = next((i for i in users if i >= len(self.history) - MAX_HISTORY), users[-1])
+            cut = next((i for i in users if i >= len(self.history) - MAX_HISTORY // 2), users[-1])
+            if cut:
+                self._summarize(self.history[:cut])
             del self.history[:cut]
+
+    def _summarize(self, dropped: list) -> None:
+        """Отрезанное начало разговора не выбрасываем, а сжимаем в резюме (вместе с прежним).
+        Не получилось — не страшно: история всё равно обрежется, ход не прерываем."""
+        lines = []
+        for m in dropped:
+            if m["role"] in ("user", "assistant") and m.get("content"):
+                who = "Семпай" if m["role"] == "user" else "Айко"
+                lines.append(f"{who}: {' '.join(m['content'].split())[:600]}")
+        if not lines:
+            return
+        old = self.ws.summary_path.read_text(encoding="utf-8") if self.ws.summary_path.is_file() else ""
+        prompt = ("Сожми разговор Айко (AI-ассистентки) с семпаем в резюме для её памяти: 5–10 коротких пунктов "
+                  "Markdown по-русски — о чём говорили, что сделали, о чём договорились, на чём остановились, "
+                  "что осталось открытым. Только факты, без тегов эмоций и вступлений.\n\n"
+                  + (f"Прежнее резюме (объедини с ним):\n{old}\n\n" if old else "")
+                  + "Разговор:\n" + "\n".join(lines)[-12_000:])
+        try:
+            summary = self._llm_text(prompt).strip()
+        except Exception:
+            return
+        if summary:
+            self.ws.summary_path.parent.mkdir(parents=True, exist_ok=True)
+            self.ws.summary_path.write_text(summary[:MAX_SUMMARY_CHARS] + "\n", encoding="utf-8")
+
+    def _llm_text(self, prompt: str) -> str:
+        """Простой запрос без инструментов и стриминга — для служебных задач."""
+        body = json.dumps({"model": self.model, "usage": {"include": True},
+                           "messages": [{"role": "user", "content": prompt}]}).encode()
+        with openrouter_request(body, self.api_key) as resp:
+            data = json.load(resp)
+        if "error" in data:
+            raise RuntimeError(f"OpenRouter: {data['error']}")
+        if isinstance(data.get("usage"), dict):
+            usage.add(data["usage"])
+        return data["choices"][0]["message"].get("content") or ""
 
     def run(self, user_text: str, emit, label: str | None = None) -> None:
         """Один ход агента. emit(dict) отправляет события в браузер;

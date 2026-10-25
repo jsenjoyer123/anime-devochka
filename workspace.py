@@ -80,6 +80,7 @@ class Workspace:
         self.memory_path = notes_path.with_suffix(".memory.md")
         self.allowed_path = notes_path.with_suffix(".allowed.json")  # команды «разрешать всегда»
         self.commits_path = notes_path.with_suffix(".commits.json")  # её коммиты: отменять можно только их
+        self.summary_path = notes_path.with_suffix(".summary.md")  # резюме старой части разговора
         self.quest = Quest(notes_path.with_suffix(".quest.json"))
 
     def _resolve(self, rel: str) -> Path:

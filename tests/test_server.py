@@ -173,6 +173,8 @@ class AgentTest(Base):
 
     def test_compaction_keeps_tool_pairs(self):
         agent = self.make_agent()
+        prompts = []
+        agent._llm_text = lambda prompt: prompts.append(prompt) or "- договорились про тесты"
         agent.history = [{"role": "user", "content": "old"}] + [{"role": "assistant", "content": "a"}] * 5
         agent.history.append({"role": "user", "content": "now"})
         for i in range(50):
@@ -182,6 +184,25 @@ class AgentTest(Base):
         self.assertEqual(agent.history[0]["content"], "now")
         self.assertTrue(agent.history[1].get("tool_calls"))
         self.assertLess(len(agent.history[2]["content"]), 400)
+        # отрезанное начало ушло в резюме, а резюме — в системный промпт
+        self.assertIn("Семпай: old", prompts[0])
+        self.assertIn("договорились про тесты", agent.system_prompt())
+
+    def test_summary_merges_and_survives_failure(self):
+        agent = self.make_agent()
+        self.ws.summary_path.parent.mkdir(parents=True, exist_ok=True)
+        self.ws.summary_path.write_text("- старое резюме\n", encoding="utf-8")
+        prompts = []
+        agent._llm_text = lambda prompt: prompts.append(prompt) or "- новое"
+        agent._summarize([{"role": "user", "content": "вопрос"}, {"role": "tool", "content": "шум"}])
+        self.assertIn("старое резюме", prompts[0])
+        self.assertNotIn("шум", prompts[0])
+
+        def broken(prompt):
+            raise RuntimeError("нет сети")
+        agent._llm_text = broken
+        agent._summarize([{"role": "user", "content": "ещё"}])
+        self.assertEqual(self.ws.summary_path.read_text(encoding="utf-8"), "- новое\n")
 
 
 class HttpTest(Base):
