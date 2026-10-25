@@ -125,6 +125,7 @@ class Handler(SimpleHTTPRequestHandler):
                 "model_url": project_model_url(agent.ws.root.name),
                 "quest": agent.ws.quest.state(),
                 "transcript": agent.transcript,
+                "allowed": agent.ws.allowed_commands(),
             })
         if self.path == "/api/onboarding":
             return self._onboarding(agent)
@@ -185,7 +186,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         if self.path not in ("/api/chat", "/api/tts", "/api/confirm", "/api/stt", "/api/project", "/api/broadcast",
-                             "/api/context"):
+                             "/api/context", "/api/allowed"):
             return self._json(404, {"error": "not found"})
         if not self._same_origin():
             return self._json(403, {"error": "forbidden"})
@@ -210,8 +211,12 @@ class Handler(SimpleHTTPRequestHandler):
         if self.path == "/api/confirm":
             edited = body.get("message")
             ok = agent.resolve_confirm(str(body.get("id", "")), body.get("approve") is True,
-                                       edited if isinstance(edited, str) else None)
+                                       edited if isinstance(edited, str) else None, body.get("always") is True)
             return self._json(200 if ok else 404, {"ok": ok})
+        if self.path == "/api/allowed":
+            # отсюда можно только забрать разрешение: выдаётся оно лишь кнопкой при подтверждении
+            agent.ws.set_allowed(str(body.get("command", "")), False)
+            return self._json(200, {"allowed": agent.ws.allowed_commands()})
         if self.path == "/api/context":
             # расширение VS Code: какой файл открыт и что выделено; файлы чужих проектов не принимаем
             ok = agent.set_editor(body)

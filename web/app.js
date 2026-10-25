@@ -620,21 +620,28 @@ function askConfirm(ev) {
   const text = commit ? Object.assign(document.createElement("textarea"), { className: "commit-msg", value: ev.message, rows: 3 }) : null;
   const row = document.createElement("div");
   row.className = "ask";
-  const answer = async (approve) => {
+  const answer = async (approve, always = false) => {
     const message = text?.value.trim();
     text?.setAttribute("readonly", "");
-    row.replaceChildren(approve ? (commit ? "✅ коммитим" : "✅ разрешено") : "⛔ запрещено");
+    row.replaceChildren(!approve ? "⛔ запрещено" : commit ? "✅ коммитим" : always ? "✅ разрешено навсегда (убрать — в меню 📁)" : "✅ разрешено");
     await fetch("/api/confirm", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: ev.id, approve, ...(message ? { message } : {}) }),
+      body: JSON.stringify({ id: ev.id, approve, always, ...(message ? { message } : {}) }),
     }).catch(() => {});
   };
   const yes = Object.assign(document.createElement("button"), { className: "yes", textContent: commit ? "Закоммитить" : "Разрешить" });
   const no = Object.assign(document.createElement("button"), { className: "no", textContent: commit ? "Не надо" : "Запретить" });
   yes.onclick = () => answer(true);
   no.onclick = () => answer(false);
-  row.append(yes, no);
+  row.append(yes);
+  if (!commit) {
+    // точно такую же команду дальше она запускает без вопросов (только в этом проекте)
+    const always = Object.assign(document.createElement("button"), { className: "yes", textContent: "Разрешать всегда", title: "Только эту команду, символ в символ, только в этом проекте" });
+    always.onclick = () => answer(true, true);
+    row.append(always);
+  }
+  row.append(no);
   if (text) div.append(text);
   div.append(row);
   chat.scrollTop = chat.scrollHeight;
@@ -1272,8 +1279,30 @@ $("projects").onclick = async () => {
     if (path) switchProject(path);
   };
   projectMenu.append(other);
+  renderAllowed(s.allowed);
   projectMenu.hidden = false;
 };
+
+/** Команды «разрешать всегда» текущего проекта — каждую можно забрать обратно. */
+function renderAllowed(list) {
+  projectMenu.querySelector(".allowed")?.remove();
+  if (!list?.length) return;
+  const box = Object.assign(document.createElement("div"), { className: "allowed" });
+  box.append(Object.assign(document.createElement("div"), { className: "allowed-title", textContent: "🔓 Запускает без вопросов:" }));
+  for (const command of list) {
+    const b = Object.assign(document.createElement("button"), { textContent: `✕ ${command}`, title: "Снова спрашивать перед запуском" });
+    b.onclick = async () => {
+      const res = await fetch("/api/allowed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command }),
+      }).catch(() => null);
+      if (res?.ok) renderAllowed((await res.json()).allowed);
+    };
+    box.append(b);
+  }
+  projectMenu.append(box);
+}
 
 async function switchProject(path) {
   projectMenu.hidden = true;

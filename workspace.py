@@ -19,6 +19,7 @@ SENPAI_PATH = NOTES_DIR / "_senpai.md"      # что Айко помнит о с
 RECENT_PATH = NOTES_DIR / "_projects.json"  # недавние проекты для переключателя
 MAX_SENPAI_LINES = 60
 MAX_PROJECT_MEMORY_LINES = 60
+MAX_ALLOWED_COMMANDS = 30
 MAX_RECENT = 10
 
 MAX_READ_CHARS = 20_000     # символов файла за одно чтение
@@ -76,6 +77,7 @@ class Workspace:
         self.chat_path = notes_path.with_suffix(".chat.json")
         # договорённости и поправки — отдельно от заметок: «Переизучить» перезаписывает заметки целиком
         self.memory_path = notes_path.with_suffix(".memory.md")
+        self.allowed_path = notes_path.with_suffix(".allowed.json")  # команды «разрешать всегда»
         self.quest = Quest(notes_path.with_suffix(".quest.json"))
 
     def _resolve(self, rel: str) -> Path:
@@ -225,6 +227,22 @@ class Workspace:
 
     def project_memory(self) -> str:
         return self.memory_path.read_text(encoding="utf-8") if self.memory_path.is_file() else ""
+
+    def allowed_commands(self) -> list[str]:
+        try:
+            items = json.loads(self.allowed_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        return [c for c in items if isinstance(c, str)] if isinstance(items, list) else []
+
+    def set_allowed(self, command: str, allowed: bool) -> None:
+        """Команды сравниваются целиком, до символа: «make test» не разрешает «make test; rm -rf ~»."""
+        items = [c for c in self.allowed_commands() if c != command]
+        if allowed:
+            items.append(command)
+        self.allowed_path.parent.mkdir(parents=True, exist_ok=True)
+        self.allowed_path.write_text(json.dumps(items[-MAX_ALLOWED_COMMANDS:], ensure_ascii=False, indent=2),
+                                     encoding="utf-8")
 
     def write_onboarding_doc(self, content: str) -> str:
         self.onboarding_path.parent.mkdir(parents=True, exist_ok=True)

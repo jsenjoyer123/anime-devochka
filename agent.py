@@ -407,6 +407,9 @@ class Agent:
         if memory := self.ws.project_memory():
             s += "\nДоговорённости и поправки в этом проекте (важнее заметок, если они расходятся):\n" + memory
         s += self.editor_hint()
+        if allowed := self.ws.allowed_commands():
+            s += ("\nЭти команды семпай разрешил запускать без подтверждения (строго в таком виде): "
+                  + "; ".join(f"`{c}`" for c in allowed) + ". Если подходит — используй их.\n")
         if self.ws.notes_path.is_file():
             s += "\nТвои заметки с онбординга:\n\n" + self.ws.notes_path.read_text(encoding="utf-8")
         return s
@@ -615,7 +618,7 @@ class Agent:
         """Показываем запрос семпаю и ждём решения. None — не ответил;
         иначе {"approved": bool, "message": правка семпая или None}."""
         rid = uuid.uuid4().hex
-        waiter = {"event": threading.Event(), "approved": False, "message": None}
+        waiter = {"event": threading.Event(), "approved": False, "message": None, "always": False}
         self.pending[rid] = waiter
         try:
             emit({"type": "confirm", "id": rid, **event})
@@ -629,12 +632,18 @@ class Agent:
             self.pending.pop(rid, None)
 
     def _run_confirmed(self, command: str, reason: str, emit) -> str:
-        """Показываем команду семпаю и ждём его решения; без «да» ничего не запускаем."""
+        """Показываем команду семпаю и ждём его решения; без «да» ничего не запускаем.
+        Исключение — команды, которые семпай раньше разрешил «всегда» (точное совпадение)."""
+        if command in self.ws.allowed_commands():
+            emit({"type": "tool", "text": f"запускаю (разрешено всегда): {command}"})
+            return devtools.run_command(self.ws.root, command)
         answer = self._confirm({"kind": "run", "command": command, "reason": reason[:300]}, emit)
         if answer is None:
             return "Семпай не ответил — команду не запускала."
         if not answer["approved"]:
             return "Семпай запретил запускать эту команду."
+        if answer["always"]:
+            self.ws.set_allowed(command, True)
         emit({"type": "tool", "text": f"запускаю: {command}"})
         return devtools.run_command(self.ws.root, command)
 
@@ -665,11 +674,12 @@ class Agent:
             result += f"\n(семпай поправил сообщение на: {final})"
         return result
 
-    def resolve_confirm(self, rid: str, approved: bool, message: str | None = None) -> bool:
+    def resolve_confirm(self, rid: str, approved: bool, message: str | None = None, always: bool = False) -> bool:
         waiter = self.pending.get(rid)
         if not waiter:
             return False
         waiter["approved"] = approved
         waiter["message"] = message
+        waiter["always"] = approved and always
         waiter["event"].set()
         return True

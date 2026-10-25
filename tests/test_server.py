@@ -133,6 +133,27 @@ class AgentTest(Base):
         self.assertIn("yes-ran", results[0])
         self.assertIn("запретил", results[1])
 
+    def test_allow_always_is_exact(self):
+        agent = self.make_agent()
+        confirms = []
+
+        def emit(ev):
+            if ev["type"] == "confirm":
+                confirms.append(ev["command"])
+                threading.Timer(0.05, agent.resolve_confirm, (ev["id"], True, None, True)).start()
+
+        for command in ("echo ok", "echo ok", "echo ok; echo pwn"):
+            agent._llm = scripted(
+                {"role": "assistant", "content": None, "tool_calls": [tool_call("1", "run_command", command=command, reason="t")]},
+                {"role": "assistant", "content": "готово"},
+            )
+            agent.run("go", emit)
+        # второй раз «echo ok» не спрашивали, а команду с хвостом — спросили
+        self.assertEqual(confirms, ["echo ok", "echo ok; echo pwn"])
+        self.assertIn("`echo ok`", agent.system_prompt())
+        self.ws.set_allowed("echo ok", False)
+        self.assertEqual(self.ws.allowed_commands(), ["echo ok; echo pwn"])
+
     def test_history_repaired_after_disconnect(self):
         agent = self.make_agent({"role": "assistant", "content": None, "tool_calls": [
             tool_call("1", "list_dir", path="."), tool_call("2", "list_dir", path="src")]})
@@ -203,6 +224,11 @@ class HttpTest(Base):
         self.assertEqual((status, body["ok"]), (200, True))
         self.assertEqual(http_api.AGENT.editor["path"], "src/app.py")
         self.assertEqual(self.post("/api/context", {"path": "/tmp"})[1]["ok"], False)
+
+    def test_allowed_can_only_be_revoked(self):
+        http_api.AGENT.ws.set_allowed("make test", True)
+        self.assertEqual(self.post("/api/allowed", {"command": "make test"}), (200, {"allowed": []}))
+        self.assertEqual(self.post("/api/allowed", {"command": "rm -rf ~", "allow": True}), (200, {"allowed": []}))
 
     def test_switch_project(self):
         other = self.tmp / "other"

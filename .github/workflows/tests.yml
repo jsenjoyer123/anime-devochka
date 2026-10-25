@@ -17,7 +17,21 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Линт (ruff: ошибки и неиспользуемые имена)
+      - name: "Линт (ruff: ошибки и неиспользуемые имена)"
         run: pipx run ruff check .
-      - name: Тесты бэкенда (модель не вызывается)
+      - name: "Тесты бэкенда (модель не вызывается)"
         run: python -m unittest discover -s tests -v
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: "Playwright и Chromium"
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+      - name: "E2E: страница, подтверждения, меню (API модели подменён)"
+        run: python -m unittest discover -s tests/e2e -v

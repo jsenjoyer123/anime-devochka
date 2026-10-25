@@ -23,6 +23,7 @@ uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt   
 - 📄 **ONBOARDING.md** — пишет документ для новых людей в команде (со схемой), можно скачать.
 - Читает git: лог, `blame`, самые часто меняемые файлы. Рисует Mermaid-схемы.
 - Запускает тесты, сборку, линтер — **только после кнопки «Разрешить»** в чате.
+  «Разрешать всегда» запоминает точно эту команду для проекта; забрать разрешение — в меню 📁.
 - ✅ **Коммит** — смотрит diff, пишет сообщение в стиле истории проекта; ты правишь его прямо
   в чате и жмёшь «Закоммитить». Push она не делает никогда.
 
@@ -99,7 +100,12 @@ ln -s "$PWD/vscode-extension" ~/.vscode/extensions/anime-devochka.aiko-chan-0.1.
 
 ```bash
 .venv/bin/python -m unittest discover -s tests    # тесты бэкенда, модель не вызывается
+uv run --with playwright python -m unittest discover -s tests/e2e   # фронт в настоящем Chromium
 ```
+
+E2E-тесты поднимают сервер и браузер, а ответы модели подменяют заготовленным NDJSON.
+Берут браузер Playwright (`playwright install chromium`) или системный Chromium
+(путь можно задать в `AIKO_CHROMIUM`); three.js грузится с CDN, так что нужен интернет.
 
 Тесты гоняет CI на каждый пуш (`.github/workflows/tests.yml`).
 
