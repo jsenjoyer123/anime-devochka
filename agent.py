@@ -9,6 +9,7 @@ import time
 import uuid
 
 import devtools
+import usage
 import workspace
 from llm import openrouter_request
 from quest import STEP_IDS
@@ -473,9 +474,11 @@ class Agent:
     def _llm(self, messages: list, emit) -> dict:
         """Запрос к модели в потоковом режиме: текст уходит в браузер по кусочкам,
         чтобы Айко начинала говорить, пока ответ ещё пишется."""
-        body = json.dumps({"model": self.model, "messages": messages, "tools": TOOLS, "stream": True}).encode()
+        body = json.dumps({"model": self.model, "messages": messages, "tools": TOOLS, "stream": True,
+                           "usage": {"include": True}}).encode()
         content: list[str] = []
         calls: dict[int, dict] = {}
+        spent = None  # usage приходит в последнем куске потока
         with openrouter_request(body, self.api_key) as resp:
             for raw in resp:  # SSE построчно — весь ответ в памяти не держим
                 line = raw.decode("utf-8", errors="replace").strip()
@@ -487,6 +490,8 @@ class Agent:
                 chunk = json.loads(data)
                 if "error" in chunk:
                     raise RuntimeError(f"OpenRouter: {chunk['error']}")
+                if isinstance(chunk.get("usage"), dict):
+                    spent = chunk["usage"]
                 delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
                 if delta.get("content"):
                     content.append(delta["content"])
@@ -498,6 +503,8 @@ class Agent:
                     fn = tc.get("function") or {}
                     slot["function"]["name"] += fn.get("name") or ""
                     slot["function"]["arguments"] += fn.get("arguments") or ""
+        if spent:
+            emit({"type": "usage", "cost": float(spent.get("cost") or 0), "today": usage.add(spent)["cost"]})
         msg = {"role": "assistant", "content": "".join(content) or None}
         if calls:
             msg["tool_calls"] = [calls[i] for i in sorted(calls)]

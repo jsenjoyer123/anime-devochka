@@ -23,6 +23,7 @@ except ImportError:
     sync_playwright = None
 
 import http_api  # noqa: E402
+import usage  # noqa: E402
 import workspace  # noqa: E402
 
 SYSTEM_CHROMIUM = os.environ.get("AIKO_CHROMIUM") or shutil.which("chromium") or shutil.which("google-chrome")
@@ -36,10 +37,11 @@ class UiTest(unittest.TestCase):
         root = cls.tmp / "proj"
         root.mkdir()
         (root / "app.py").write_text("print('hi')\n", encoding="utf-8")
-        cls._paths = (workspace.NOTES_DIR, workspace.SENPAI_PATH, workspace.RECENT_PATH)
+        cls._paths = (workspace.NOTES_DIR, workspace.SENPAI_PATH, workspace.RECENT_PATH, workspace.USAGE_PATH)
         workspace.NOTES_DIR = cls.tmp / "notes"
         workspace.SENPAI_PATH = workspace.NOTES_DIR / "_senpai.md"
         workspace.RECENT_PATH = workspace.NOTES_DIR / "_projects.json"
+        workspace.USAGE_PATH = workspace.NOTES_DIR / "_usage.json"
         http_api.API_KEY, http_api.MODEL = "key", "test-model"
         http_api.AGENTS.clear()
         cls.agent = http_api.open_project(root)
@@ -58,7 +60,7 @@ class UiTest(unittest.TestCase):
         cls.pw.stop()
         cls.httpd.shutdown()
         cls.httpd.server_close()
-        workspace.NOTES_DIR, workspace.SENPAI_PATH, workspace.RECENT_PATH = cls._paths
+        workspace.NOTES_DIR, workspace.SENPAI_PATH, workspace.RECENT_PATH, workspace.USAGE_PATH = cls._paths
         shutil.rmtree(cls.tmp)
 
     def setUp(self):
@@ -126,6 +128,17 @@ class UiTest(unittest.TestCase):
         self.assertEqual(self.page.text_content("#screen-title"), "app.py · правки")
         classes = self.page.eval_on_selector_all("#screen pre.diff span", "els => els.map(e => e.className)")
         self.assertEqual(classes, ["file", "hunk", "del", "add"])
+
+    def test_spent_counter_and_expensive_turn(self):
+        self.chat_replies({"type": "usage", "cost": 0.04, "today": 0.31},
+                          {"type": "usage", "cost": 0.03, "today": 0.34},
+                          {"type": "reply", "text": "готово"})
+        self.open()
+        self.assertFalse(self.page.is_visible("#spent"))  # сегодня ещё ничего не потрачено
+        usage.add({"cost": 0.34})  # сервер знает тот же итог, что пришёл в потоке
+        self.say("изучи всё")
+        self.page.wait_for_selector("text=этот ответ стоил ~7¢")
+        self.assertEqual(self.page.text_content("#spent"), "💸 0,34 $")
 
     def test_allowed_commands_in_menu(self):
         self.agent.ws.set_allowed("make lint", True)

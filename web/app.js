@@ -665,6 +665,15 @@ function setBusy(busy) {
   }
 }
 
+// расходы на OpenRouter: итог за день в шапке; дорогой ответ — она смущённо признаётся
+const SPENDY_TURN_USD = 0.05;
+let turnCost = 0;
+function showSpent(usd) {
+  const el = $("spent");
+  el.hidden = OBS || !(usd > 0);
+  el.textContent = `💸 ${usd < 0.01 ? "<0,01" : usd.toFixed(2).replace(".", ",")} $`;
+}
+
 // ответ, который ещё пишется: текст в чате обновляется, готовые предложения сразу озвучиваются
 let live = null; // { raw, pending, div }
 
@@ -703,6 +712,7 @@ function finishLive(kind) {
 }
 
 async function ask(payload) {
+  turnCost = 0;
   setBusy(true);
   stopSpeaking();
   live = null;
@@ -758,6 +768,9 @@ function handleEvent(ev) {
     mirror({ t: "diagram", ev });
   } else if (ev.type === "confirm") {
     askConfirm(ev);
+  } else if (ev.type === "usage") {
+    turnCost += ev.cost;
+    showSpent(ev.today);
   } else if (ev.type === "committed") {
     lastHead = ev.head; // свой коммит она уже видела — реагировать на него не нужно
   } else if (ev.type === "reminder") {
@@ -785,6 +798,14 @@ function handleEvent(ev) {
       speak(ev.text);
     }
     refreshStatus();
+    if (turnCost > SPENDY_TURN_USD) {
+      const cents = Math.round(turnCost * 100);
+      addMessage("tool", `💸 этот ответ стоил ~${cents}¢`);
+      enqueueSpeech(pick([
+        `[shy] Ой, семпай... этот ответ обошёлся в ${cents} центов. Я больше не буду так много читать!`,
+        `[surprised] Ого, ${cents} центов за один ответ! Я дорогая девочка, хе-хе.`,
+      ]));
+    }
   } else if (ev.type === "error") {
     addMessage("error", ev.text);
     state.emotion = "sad";
@@ -925,6 +946,7 @@ async function refreshStatus() {
   try {
     const s = await (await fetch("/api/status")).json();
     $("meta").textContent = `${s.project} · ${s.model}`;
+    showSpent(s.spent_today);
     serverTTS = s.tts;
     projectModelUrl = s.model_url;
     if (s.outfit && !outfit) changeOutfit(s.outfit, false);

@@ -17,6 +17,7 @@ HERE = Path(__file__).resolve().parent
 NOTES_DIR = HERE / "notes"
 SENPAI_PATH = NOTES_DIR / "_senpai.md"      # что Айко помнит о семпае — общее для всех проектов
 RECENT_PATH = NOTES_DIR / "_projects.json"  # недавние проекты для переключателя
+USAGE_PATH = NOTES_DIR / "_usage.json"      # расходы OpenRouter по дням
 MAX_SENPAI_LINES = 60
 MAX_PROJECT_MEMORY_LINES = 60
 MAX_ALLOWED_COMMANDS = 30

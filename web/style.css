@@ -252,6 +252,8 @@ button.on { background: #e2336b; color: #fff; }
 .msg .ask button { font-size: 12px; padding: 5px 10px; }
 .msg .ask .yes { background: #b8f0c8; }
 .msg .ask .no { background: #ffd0d0; }
+#spent { font-size: 12px; opacity: .75; white-space: nowrap; }
+#spent[hidden] { display: none; }
 #project-menu .allowed { border-top: 1px solid #f0c3d8; margin-top: 4px; padding-top: 4px; }
 #project-menu .allowed-title { font-size: 11px; opacity: .7; padding: 2px 8px; }
 .msg .commit-msg {

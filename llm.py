@@ -10,6 +10,8 @@ import re
 import urllib.error
 import urllib.request
 
+import usage
+
 try:  # голос: нейросетевой TTS Microsoft Edge (онлайн, локально ничего не грузит)
     import edge_tts
 except ImportError:
@@ -58,6 +60,7 @@ def transcribe(wav: bytes, api_key: str) -> str:
         # OpenRouter сам переключится на следующую модель, если предыдущая недоступна
         "models": list(dict.fromkeys([os.environ.get("AIKO_STT_MODEL", STT_MODEL), *STT_FALLBACKS])),
         "temperature": 0,
+        "usage": {"include": True},
         "messages": [{"role": "user", "content": [
             {"type": "text", "text": "Дословно запиши, что сказано в аудио, на языке оригинала "
                                      "(обычно русский). Только текст, без пояснений и кавычек. "
@@ -69,6 +72,8 @@ def transcribe(wav: bytes, api_key: str) -> str:
         data = json.load(resp)
     if "error" in data:
         raise RuntimeError(f"OpenRouter: {data['error']}")
+    if isinstance(data.get("usage"), dict):
+        usage.add(data["usage"])
     return (data["choices"][0]["message"].get("content") or "").strip()
 
 

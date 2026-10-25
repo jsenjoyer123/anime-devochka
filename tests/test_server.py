@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import agent as agent_mod  # noqa: E402
 import devtools  # noqa: E402
 import http_api  # noqa: E402
+import usage  # noqa: E402
 import workspace  # noqa: E402
 
 
@@ -55,13 +56,14 @@ class Base(unittest.TestCase):
         make_project(self.root)
         self.notes = self.tmp / "notes"
         # общая память и список проектов — тоже во временной папке
-        self._paths = (workspace.SENPAI_PATH, workspace.RECENT_PATH)
+        self._paths = (workspace.SENPAI_PATH, workspace.RECENT_PATH, workspace.USAGE_PATH)
         workspace.SENPAI_PATH = self.notes / "_senpai.md"
         workspace.RECENT_PATH = self.notes / "_projects.json"
+        workspace.USAGE_PATH = self.notes / "_usage.json"
         self.ws = workspace.Workspace(self.root, self.notes / "proj.md")
 
     def tearDown(self):
-        workspace.SENPAI_PATH, workspace.RECENT_PATH = self._paths
+        workspace.SENPAI_PATH, workspace.RECENT_PATH, workspace.USAGE_PATH = self._paths
         shutil.rmtree(self.tmp)
 
 
@@ -438,6 +440,44 @@ class VoiceTest(unittest.TestCase):
         sad, plain = llm.voice_params("sad"), llm.voice_params("неизвестная")
         self.assertEqual(plain["volume"], "+0%")
         self.assertLess(int(sad["pitch"][:-2]), int(plain["pitch"][:-2]))
+
+
+class UsageTest(Base):
+    def test_stream_parsing_and_cost(self):
+        chunks = [
+            {"choices": [{"delta": {"content": "[happy] При"}}]},
+            {"choices": [{"delta": {"content": "вет"}}]},
+            {"choices": [{"delta": {}, "finish_reason": "stop"}],
+             "usage": {"total_tokens": 120, "cost": 0.0021}},
+        ]
+        lines = [b": OPENROUTER PROCESSING\n"] + [f"data: {json.dumps(c)}\n".encode() for c in chunks] + [b"data: [DONE]\n"]
+
+        class Resp(list):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        sent = []
+        original = agent_mod.openrouter_request
+        agent_mod.openrouter_request = lambda body, key: sent.append(json.loads(body)) or Resp(lines)
+        try:
+            events = []
+            agent = agent_mod.Agent(self.ws, "key", "model")
+            agent.run("привет", events.append)
+            agent.run("ещё", lambda ev: None)
+        finally:
+            agent_mod.openrouter_request = original
+        self.assertEqual(sent[0]["usage"], {"include": True})
+        self.assertEqual("".join(e["text"] for e in events if e["type"] == "delta"), "[happy] Привет")
+        self.assertEqual([e for e in events if e["type"] == "usage"], [{"type": "usage", "cost": 0.0021, "today": 0.0021}])
+        self.assertEqual(agent.history[-1]["content"], "[happy] Привет")
+        self.assertEqual(usage.today(), {"cost": 0.0042, "tokens": 240, "requests": 2})
+
+    def test_bad_usage_is_ignored(self):
+        usage.add({"cost": "много"})
+        self.assertEqual(usage.today()["requests"], 0)
 
 
 class SeasonTest(unittest.TestCase):

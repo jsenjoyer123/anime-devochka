@@ -11,6 +11,7 @@ from http.server import SimpleHTTPRequestHandler
 from pathlib import Path
 
 import devtools
+import usage
 import workspace
 from agent import Agent, TASKS
 from llm import MAX_AUDIO_BYTES, MAX_TTS_CHARS, edge_tts, synthesize, transcribe
@@ -126,6 +127,7 @@ class Handler(SimpleHTTPRequestHandler):
                 "quest": agent.ws.quest.state(),
                 "transcript": agent.transcript,
                 "allowed": agent.ws.allowed_commands(),
+                "spent_today": usage.today()["cost"],
             })
         if self.path == "/api/onboarding":
             return self._onboarding(agent)
