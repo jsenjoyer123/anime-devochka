@@ -21,6 +21,17 @@
     <canvas id="scene"></canvas>
     <div id="badge">✿ Айко-тян <span id="outfit-name"></span> <span id="live">● LIVE</span></div>
     <div id="thinking" hidden></div>
+    <section id="screen" hidden>
+      <header>
+        <span id="screen-title"></span>
+        <span class="screen-nav">
+          <button id="screen-prev" title="Предыдущий показ">◀</button>
+          <button id="screen-next" title="Следующий показ">▶</button>
+          <button id="screen-close" title="Убрать с экрана">✕</button>
+        </span>
+      </header>
+      <div id="screen-body"></div>
+    </section>
     <div id="subtitles"></div>
     <div id="drop-hint">Перетащи сюда .vrm-модель, чтобы сменить облик</div>
     <div id="loading">Айко-тян собирается на стрим…</div>
@@ -37,7 +48,15 @@
       </div>
     </header>
     <div id="chat"></div>
+    <div id="chips">
+      <button type="button" id="next" class="chip" hidden>Дальше →</button>
+    </div>
     <button id="learn" hidden>✨ Изучить проект</button>
+    <div id="actions">
+      <button type="button" data-action="tour" title="Пошаговая экскурсия по коду">🗺 Экскурсия</button>
+      <button type="button" data-action="review" title="Ревью незакоммиченных изменений">🔍 Ревью</button>
+      <button type="button" data-action="doc" title="Написать ONBOARDING.md для команды">📄 ONBOARDING</button>
+    </div>
     <form id="form">
       <button type="button" id="mic" title="Сказать голосом" hidden>🎤</button>
       <input id="input" autocomplete="off" placeholder="Спроси что-нибудь о проекте, семпай…">

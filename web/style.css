@@ -183,3 +183,66 @@ button.on { background: #e2336b; color: #fff; }
   body { flex-direction: column; }
   #panel { width: 100%; height: 45%; border-left: none; border-top: 2px solid #f6c3dc; }
 }
+
+/* ---------- экран стрима: код и схемы ---------- */
+#screen {
+  position: absolute;
+  top: 64px;
+  left: 16px;
+  width: min(52%, 640px);
+  max-height: calc(100% - 170px);
+  display: flex;
+  flex-direction: column;
+  border-radius: 14px;
+  background: rgba(30, 22, 40, .92);
+  color: #f6eefb;
+  box-shadow: 0 10px 30px rgba(60, 20, 80, .35);
+  overflow: hidden;
+}
+#screen[hidden] { display: none; }
+#screen header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: rgba(255, 143, 199, .25);
+  font-size: 13px;
+  font-weight: 700;
+}
+.screen-nav { display: flex; gap: 2px; flex-shrink: 0; }
+.screen-nav button { background: none; color: inherit; padding: 2px 8px; }
+.screen-nav button:disabled { opacity: .3; }
+#screen-body { overflow: auto; padding: 10px 0; }
+#screen-body pre {
+  margin: 0;
+  font: 12.5px/1.5 ui-monospace, "JetBrains Mono", monospace;
+  counter-reset: line var(--start, 0);
+}
+#screen-body pre span {
+  display: block;
+  padding: 0 14px 0 0;
+  white-space: pre;
+}
+#screen-body pre span::before {
+  counter-increment: line;
+  content: counter(line);
+  display: inline-block;
+  width: 3.2em;
+  margin-right: 12px;
+  text-align: right;
+  opacity: .4;
+}
+#screen-body .diagram { padding: 0 12px; background: #fff; }
+#screen-body .diagram svg { max-width: 100%; height: auto; }
+
+/* ---------- кнопки действий ---------- */
+#chips { display: flex; gap: 6px; padding: 0 12px 6px; }
+.chip { font-size: 13px; padding: 6px 12px; background: #e9e4ff; }
+#actions { display: flex; gap: 6px; padding: 0 12px 8px; }
+#actions button { flex: 1; font-size: 12px; padding: 7px 4px; }
+.msg .ask { display: flex; gap: 6px; margin-top: 8px; }
+.msg .ask button { font-size: 12px; padding: 5px 10px; }
+.msg .ask .yes { background: #b8f0c8; }
+.msg .ask .no { background: #ffd0d0; }
+.msg a { color: #b03a7c; font-weight: 700; }

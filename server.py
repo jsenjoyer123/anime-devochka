@@ -15,8 +15,11 @@ import re
 import threading
 import urllib.error
 import urllib.request
+import uuid
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+import devtools
 
 try:  # голос: нейросетевой TTS Microsoft Edge (онлайн, локально ничего не грузит)
     import edge_tts
@@ -77,6 +80,11 @@ PERSONA = """Ты — Айко-тян, AI-витубер в стиле Neuro-sam
 - Изучай целенаправленно: структура → манифесты (package.json, pyproject.toml, go.mod, \
 Cargo.toml, Makefile, Dockerfile...) → README → точки входа → ядро логики.
 
+У тебя есть «экран стрима»: когда объясняешь код — показывай его через show_code, \
+схемы — через show_diagram (Mermaid). История проекта — git_log, git_show, git_blame, \
+git_hotspots, git_diff. Команды (тесты, сборку, линтер) запускай через run_command — \
+семпай сначала подтвердит; ничего разрушительного не предлагай.
+
 Ты умеешь переодеваться инструментом set_outfit. Образ отражает проект: его язык, \
 стек и настроение (цвета экосистемы, подходящий аксессуар, значок на груди). \
 Если семпай просит переодеться — переодевайся.
@@ -87,11 +95,30 @@ IDLE_TASK = """(Системное событие, не сообщение се�
 о проекте из своих заметок, шутка про код, вопрос семпаю или жалоба, что скучно. \
 Инструменты не используй."""
 
+TOUR_TASK = """Семпай хочет экскурсию по проекту. Проведи её пошагово, как гид: 5–7 шагов \
+от точки входа к ядру логики. На КАЖДОМ шаге: покажи ключевой фрагмент через show_code \
+(10–40 строк) и объясни его в 2–4 предложениях. За один ответ — один шаг, в конце шага \
+спроси «Дальше?». Когда семпай скажет «дальше» — следующий шаг. Перед первым шагом \
+можешь показать схему через show_diagram. После последнего шага задай 2 вопроса \
+на понимание и проверь ответы семпая. Начинай с первого шага."""
+
+REVIEW_TASK = """Семпай просит код-ревью текущих изменений. Посмотри git_diff (и staged=true), \
+при необходимости — окружающий код. Сделай ревью в своём стиле: сначала главное — баги и риски, \
+потом стиль и мелочи. Ссылайся на `файл:строка`, самые важные места покажи через show_code. \
+Если изменений нет — так и скажи."""
+
+DOC_TASK = """Составь для новых людей в команде документ ONBOARDING.md (Markdown, по-русски): \
+что это за проект, как поднять окружение, как запустить и протестировать, архитектура \
+со схемой Mermaid, ключевые файлы, как устроен типичный сценарий, соглашения, подводные камни, \
+к кому/куда идти с вопросами. Опирайся на заметки и проверяй факты инструментами. \
+Сохрани через write_onboarding_doc и коротко скажи семпаю, что готово."""
+
 ACCESSORIES = ["none", "glasses", "cap", "headphones", "cat_ears", "hard_hat", "beret", "bow"]
 
 LEARN_TASK = """Семпай попросил тебя пройти онбординг в этот проект.
 
-Изучи кодовую базу инструментами и ОБЯЗАТЕЛЬНО сохрани итог через write_notes. \
+Изучи кодовую базу инструментами (если это git-репозиторий — загляни и в git_hotspots \
+с git_log: там видно, где кипит жизнь) и ОБЯЗАТЕЛЬНО сохрани итог через write_notes. \
 Заметки — твоя долговременная память: Markdown, по-русски, без тегов эмоций, плотно и по делу:
 
 # <Название проекта>
@@ -156,7 +183,78 @@ TOOLS = [
             "badge_color": {"type": "string", "description": "Фон значка"},
         }, "required": ["name", "top_color", "accessory", "badge_text"]},
     }},
+    {"type": "function", "function": {
+        "name": "git_log",
+        "description": "История коммитов (вся или по файлу).",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string", "description": "Файл или папка; без него — весь проект"},
+            "max_count": {"type": "integer", "default": 20},
+        }},
+    }},
+    {"type": "function", "function": {
+        "name": "git_show",
+        "description": "Что изменилось в коммите: список файлов и diff.",
+        "parameters": {"type": "object", "properties": {
+            "commit": {"type": "string", "description": "Хеш или HEAD~N"},
+        }, "required": ["commit"]},
+    }},
+    {"type": "function", "function": {
+        "name": "git_blame",
+        "description": "Кто и когда менял строки файла (до 200 строк за раз).",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string"},
+            "start_line": {"type": "integer"},
+            "end_line": {"type": "integer"},
+        }, "required": ["path", "start_line", "end_line"]},
+    }},
+    {"type": "function", "function": {
+        "name": "git_hotspots",
+        "description": "Файлы, которые чаще всего менялись в последних коммитах.",
+        "parameters": {"type": "object", "properties": {}},
+    }},
+    {"type": "function", "function": {
+        "name": "git_diff",
+        "description": "Незакоммиченные изменения в рабочей копии.",
+        "parameters": {"type": "object", "properties": {
+            "staged": {"type": "boolean", "default": False, "description": "true — только добавленные в индекс"},
+        }},
+    }},
+    {"type": "function", "function": {
+        "name": "show_code",
+        "description": "Показать фрагмент файла семпаю на экране стрима (до 60 строк).",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string"},
+            "start_line": {"type": "integer"},
+            "end_line": {"type": "integer"},
+            "caption": {"type": "string", "description": "Короткая подпись"},
+        }, "required": ["path", "start_line", "end_line"]},
+    }},
+    {"type": "function", "function": {
+        "name": "show_diagram",
+        "description": "Показать схему на экране стрима. Код Mermaid (flowchart, sequenceDiagram и т.п.).",
+        "parameters": {"type": "object", "properties": {
+            "mermaid": {"type": "string"},
+            "title": {"type": "string"},
+        }, "required": ["mermaid"]},
+    }},
+    {"type": "function", "function": {
+        "name": "write_onboarding_doc",
+        "description": "Сохранить документ ONBOARDING.md для новых людей (Markdown).",
+        "parameters": {"type": "object", "properties": {"content": {"type": "string"}}, "required": ["content"]},
+    }},
+    {"type": "function", "function": {
+        "name": "run_command",
+        "description": "Выполнить shell-команду в корне проекта (тесты, сборка, линтер). "
+                       "Семпай увидит команду и должен подтвердить. Таймаут 3 минуты.",
+        "parameters": {"type": "object", "properties": {
+            "command": {"type": "string"},
+            "reason": {"type": "string", "description": "Зачем это нужно — коротко, для семпая"},
+        }, "required": ["command", "reason"]},
+    }},
 ]
+
+MAX_SHOW_LINES = 60
+CONFIRM_TIMEOUT = 300  # сколько ждём, пока семпай нажмёт «разрешить»
 
 HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
@@ -198,6 +296,7 @@ class Workspace:
         self.root = root.resolve()
         self.notes_path = notes_path
         self.outfit_path = notes_path.with_suffix(".outfit.json")
+        self.onboarding_path = notes_path.with_suffix(".ONBOARDING.md")
 
     def _resolve(self, rel: str) -> Path:
         p = (self.root / rel).resolve()
@@ -327,9 +426,50 @@ class Workspace:
         except (OSError, json.JSONDecodeError):
             return None
 
+    def write_onboarding_doc(self, content: str) -> str:
+        self.onboarding_path.parent.mkdir(parents=True, exist_ok=True)
+        self.onboarding_path.write_text(content, encoding="utf-8")
+        return "ONBOARDING.md сохранён, семпай может скачать его кнопкой в чате"
+
+    def code_snippet(self, path: str, start_line: int, end_line: int) -> dict:
+        """Фрагмент для экрана стрима: без номеров строк, не больше MAX_SHOW_LINES."""
+        p = self._resolve(path)
+        if self._is_secret(p.name) or not p.is_file() or self._is_binary(p):
+            raise ValueError(f"Не могу показать {path}")
+        start = max(1, int(start_line))
+        end = min(int(end_line), start + MAX_SHOW_LINES - 1)
+        lines = []
+        with p.open("r", encoding="utf-8", errors="replace") as f:
+            for n, line in enumerate(f, 1):
+                if n > end:
+                    break
+                if n >= start:
+                    lines.append(line.rstrip("\n")[:300])
+        return {"path": self._rel(p), "start": start, "code": "\n".join(lines)}
+
+    # git — только чтение; пути проверяем так же, как для файлов
+    def git_log(self, path: str | None = None, max_count: int = 20) -> str:
+        rel = self._rel(self._resolve(path)) if path else None
+        return devtools.git_log(self.root, rel, max_count)
+
+    def git_show(self, commit: str) -> str:
+        return devtools.git_show(self.root, commit)
+
+    def git_blame(self, path: str, start_line: int, end_line: int) -> str:
+        return devtools.git_blame(self.root, self._rel(self._resolve(path)), start_line, end_line)
+
+    def git_hotspots(self) -> str:
+        return devtools.git_hotspots(self.root)
+
+    def git_diff(self, staged: bool = False) -> str:
+        return devtools.git_diff(self.root, bool(staged))
+
     def call(self, name: str, args: dict) -> str:
         fn = {"list_dir": self.list_dir, "read_file": self.read_file, "search": self.search,
-              "write_notes": self.write_notes, "set_outfit": self.set_outfit}.get(name)
+              "write_notes": self.write_notes, "set_outfit": self.set_outfit,
+              "write_onboarding_doc": self.write_onboarding_doc,
+              "git_log": self.git_log, "git_show": self.git_show, "git_blame": self.git_blame,
+              "git_hotspots": self.git_hotspots, "git_diff": self.git_diff}.get(name)
         if fn is None:
             return f"Неизвестный инструмент: {name}"
         try:
@@ -350,6 +490,16 @@ def describe_call(name: str, args: dict) -> str:
         return "записываю заметки в блокнотик ✎"
     if name == "set_outfit":
         return "переодеваюсь ✨"
+    if name.startswith("git_"):
+        return f"листаю git ({name[4:]})"
+    if name == "show_code":
+        return f"показываю {args.get('path')}"
+    if name == "show_diagram":
+        return "рисую схему ✏"
+    if name == "write_onboarding_doc":
+        return "пишу ONBOARDING.md ✎"
+    if name == "run_command":
+        return f"хочу запустить: {args.get('command')}"
     return name
 
 
@@ -360,6 +510,7 @@ class Agent:
         self.model = model
         self.history: list = []
         self.lock = threading.Lock()  # один ответ за раз
+        self.pending: dict[str, dict] = {}  # запросы на запуск команд: id → {event, approved}
 
     def system_prompt(self) -> str:
         s = PERSONA + f"\nКорень проекта: {self.ws.root.name} (все пути относительно него).\n"
@@ -402,6 +553,24 @@ class Agent:
 
     def run(self, user_text: str, emit) -> None:
         """Один ход агента. emit(dict) отправляет события в браузер."""
+        try:
+            self._run(user_text, emit)
+        except BaseException:
+            self._repair_history()
+            raise
+
+    def _repair_history(self) -> None:
+        """Ход оборвался посреди вызова инструментов: убираем вызовы без результатов,
+        иначе следующий запрос к модели упадёт."""
+        for i in range(len(self.history) - 1, -1, -1):
+            m = self.history[i]
+            if m["role"] == "assistant" and m.get("tool_calls"):
+                answered = {x.get("tool_call_id") for x in self.history[i + 1:] if x["role"] == "tool"}
+                if not all(c["id"] in answered for c in m["tool_calls"]):
+                    del self.history[i:]
+                return
+
+    def _run(self, user_text: str, emit) -> None:
         self.history.append({"role": "user", "content": user_text})
         for _ in range(MAX_STEPS):
             self._compact()
@@ -420,11 +589,63 @@ class Agent:
                 except json.JSONDecodeError:
                     args = {}
                 emit({"type": "tool", "text": describe_call(name, args)})
-                result = self.ws.call(name, args)
+                result = self._call_tool(name, args, emit)
                 self.history.append({"role": "tool", "tool_call_id": call["id"], "content": result})
-                if name == "set_outfit":
-                    emit({"type": "outfit", "outfit": self.ws.outfit()})
         emit({"type": "reply", "text": "[sad] Ой, я слишком долго копалась и упёрлась в лимит шагов. Спроси поконкретнее, семпай!"})
+
+    def _call_tool(self, name: str, args: dict, emit) -> str:
+        """Инструменты, которым нужен браузер (экран, подтверждение), обрабатываем здесь."""
+        try:
+            if name == "show_code":
+                snippet = self.ws.code_snippet(args["path"], args["start_line"], args["end_line"])
+                emit({"type": "code", "caption": str(args.get("caption") or "")[:120], **snippet})
+                return f"Показала {snippet['path']}:{snippet['start']} на экране"
+            if name == "show_diagram":
+                emit({"type": "diagram", "title": str(args.get("title") or "")[:120],
+                      "mermaid": str(args["mermaid"])[:8000]})
+                return "Схема на экране"
+            if name == "run_command":
+                return self._run_confirmed(str(args["command"]), str(args.get("reason") or ""), emit)
+        except (BrokenPipeError, ConnectionResetError):
+            raise  # браузер ушёл — прерываем ход целиком
+        except Exception as e:
+            return f"Ошибка: {type(e).__name__}: {e}"
+
+        result = self.ws.call(name, args)
+        if name == "set_outfit":
+            emit({"type": "outfit", "outfit": self.ws.outfit()})
+        elif name == "write_onboarding_doc":
+            emit({"type": "doc", "url": "/api/onboarding"})
+        return result
+
+    def _run_confirmed(self, command: str, reason: str, emit) -> str:
+        """Показываем команду семпаю и ждём его решения; без «да» ничего не запускаем."""
+        rid = uuid.uuid4().hex
+        waiter = {"event": threading.Event(), "approved": False}
+        self.pending[rid] = waiter
+        try:
+            emit({"type": "confirm", "id": rid, "command": command, "reason": reason[:300]})
+            # пингуем браузер: если вкладку закрыли, emit упадёт и ход прервётся, а не повиснет
+            for _ in range(CONFIRM_TIMEOUT // 5):
+                if waiter["event"].wait(5):
+                    break
+                emit({"type": "ping"})
+            else:
+                return "Семпай не ответил — команду не запускала."
+            if not waiter["approved"]:
+                return "Семпай запретил запускать эту команду."
+            emit({"type": "tool", "text": f"запускаю: {command}"})
+            return devtools.run_command(self.ws.root, command)
+        finally:
+            self.pending.pop(rid, None)
+
+    def resolve_confirm(self, rid: str, approved: bool) -> bool:
+        waiter = self.pending.get(rid)
+        if not waiter:
+            return False
+        waiter["approved"] = approved
+        waiter["event"].set()
+        return True
 
 
 AGENT: Agent | None = None
@@ -468,12 +689,41 @@ class Handler(SimpleHTTPRequestHandler):
                 "has_notes": AGENT.has_notes(),
                 "tts": edge_tts is not None,
                 "outfit": AGENT.ws.outfit(),
+                "has_doc": AGENT.ws.onboarding_path.is_file(),
             })
+        if self.path == "/api/onboarding":
+            return self._onboarding()
         return super().do_GET()
 
+    def _onboarding(self) -> None:
+        try:
+            data = AGENT.ws.onboarding_path.read_bytes()
+        except OSError:
+            return self._json(404, {"error": "ONBOARDING.md ещё не написан"})
+        self.send_response(200)
+        self.send_header("Content-Type", "text/markdown; charset=utf-8")
+        self.send_header("Content-Disposition", 'attachment; filename="ONBOARDING.md"')
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _same_origin(self) -> bool:
+        """Защита от чужих сайтов в браузере (CSRF) и DNS rebinding: Айко умеет запускать команды."""
+        port = self.server.server_address[1]
+        allowed = {f"127.0.0.1:{port}", f"localhost:{port}"}
+        if self.headers.get("Host") not in allowed:
+            return False
+        origin = self.headers.get("Origin")
+        if origin and origin.split("://", 1)[-1] not in allowed:
+            return False
+        # JSON заставляет браузер делать preflight для чужих сайтов, а его мы не разрешаем
+        return (self.headers.get("Content-Type") or "").startswith("application/json")
+
     def do_POST(self):
-        if self.path not in ("/api/chat", "/api/tts"):
+        if self.path not in ("/api/chat", "/api/tts", "/api/confirm"):
             return self._json(404, {"error": "not found"})
+        if not self._same_origin():
+            return self._json(403, {"error": "forbidden"})
         length = int(self.headers.get("Content-Length") or 0)
         if length > MAX_BODY_BYTES:
             return self._json(413, {"error": "слишком длинное сообщение"})
@@ -484,8 +734,12 @@ class Handler(SimpleHTTPRequestHandler):
 
         if self.path == "/api/tts":
             return self._tts(str(body.get("text", ""))[:MAX_TTS_CHARS].strip())
+        if self.path == "/api/confirm":
+            ok = AGENT.resolve_confirm(str(body.get("id", "")), body.get("approve") is True)
+            return self._json(200 if ok else 404, {"ok": ok})
 
-        actions = {"learn": LEARN_TASK, "idle": IDLE_TASK}
+        actions = {"learn": LEARN_TASK, "idle": IDLE_TASK, "tour": TOUR_TASK,
+                   "review": REVIEW_TASK, "doc": DOC_TASK}
         text = actions.get(body.get("action")) or str(body.get("message", "")).strip()
         if not text:
             return self._json(400, {"error": "пустое сообщение"})

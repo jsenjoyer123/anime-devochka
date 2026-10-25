@@ -3,6 +3,7 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
 import { applyOutfit, removeOutfit } from "./outfit.js";
 import { Motion, idlePose, GESTURE_NAMES } from "./motion.js";
+import { showCode, showDiagram, isScreenVisible } from "./screen.js";
 
 // Если своей модели нет в web/models/aiko.vrm — берём пример из репозитория three-vrm
 const MODEL_URLS = [
@@ -216,6 +217,8 @@ function animate(t, dt) {
   // тело: поза покоя + жест
   motion.update(dt, idlePose(t, state), bone);
   holder.position.y = motion.hopOffset();
+  // когда на экране код — отходит в сторону, чтобы не загораживать
+  holder.position.x = damp(holder.position.x, isScreenVisible() ? 0.22 : 0, 3, dt);
 
   // куда смотрит: задумалась → вверх-в-сторону, иначе на курсор, на что-то своё или на зрителя
   const now = performance.now();
@@ -503,11 +506,36 @@ function addMessage(kind, text) {
   chat.append(div);
   while (chat.children.length > MAX_CHAT_MESSAGES) chat.firstElementChild.remove();
   chat.scrollTop = chat.scrollHeight;
+  return div;
+}
+
+/** Айко просит разрешения запустить команду — решает только семпай. */
+function askConfirm(ev) {
+  const div = addMessage("aiko", `Можно запущу \`${ev.command}\`?${ev.reason ? `\n${ev.reason}` : ""}`);
+  const row = document.createElement("div");
+  row.className = "ask";
+  const answer = async (approve) => {
+    row.replaceChildren(approve ? "✅ разрешено" : "⛔ запрещено");
+    await fetch("/api/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: ev.id, approve }),
+    }).catch(() => {});
+  };
+  const yes = Object.assign(document.createElement("button"), { className: "yes", textContent: "Разрешить" });
+  const no = Object.assign(document.createElement("button"), { className: "no", textContent: "Запретить" });
+  yes.onclick = () => answer(true);
+  no.onclick = () => answer(false);
+  row.append(yes, no);
+  div.append(row);
+  chat.scrollTop = chat.scrollHeight;
+  quip("[shy] Семпай, можно я кое-что запущу? Нажми «Разрешить» в чате.");
 }
 
 function setBusy(busy) {
   sendBtn.disabled = busy;
   learnBtn.disabled = busy;
+  for (const b of document.querySelectorAll("#actions button, #next")) b.disabled = busy;
   state.thinking = busy;
   if (busy) {
     state.emotion = "relaxed";
@@ -561,12 +589,23 @@ function handleEvent(ev) {
     narrate(ev);
   } else if (ev.type === "outfit") {
     if (ev.outfit) changeOutfit(ev.outfit);
+  } else if (ev.type === "code") {
+    showCode(ev);
+  } else if (ev.type === "diagram") {
+    showDiagram(ev);
+  } else if (ev.type === "confirm") {
+    askConfirm(ev);
+  } else if (ev.type === "doc") {
+    const div = addMessage("aiko", "ONBOARDING.md готов: ");
+    div.append(Object.assign(document.createElement("a"), { href: ev.url, textContent: "скачать", download: "ONBOARDING.md" }));
   } else if (ev.type === "thought") {
+    if (!stripTags(ev.text)) return;
     addMessage("tool", stripTags(ev.text));
     lastNarration = performance.now();
     quip(ev.text); // думает вслух
   } else if (ev.type === "reply") {
     setBusy(false);
+    $("next").hidden = !touring;
     addMessage("aiko", stripTags(ev.text));
     speak(ev.text);
     refreshStatus();
@@ -586,8 +625,31 @@ $("form").addEventListener("submit", (e) => {
 });
 
 learnBtn.onclick = () => {
+  touring = false;
   addMessage("user", "Айко, изучи, пожалуйста, проект ✨");
   ask({ action: "learn" });
+};
+
+// экскурсия идёт, пока не запустили другое действие; «Дальше →» — быстрый ответ
+let touring = false;
+const ACTION_LABELS = {
+  tour: "Айко, проведи экскурсию по коду 🗺",
+  review: "Айко, посмотри мои изменения 🔍",
+  doc: "Айко, напиши ONBOARDING.md для команды 📄",
+};
+for (const btn of document.querySelectorAll("#actions button")) {
+  btn.onclick = () => {
+    const action = btn.dataset.action;
+    touring = action === "tour";
+    $("next").hidden = true;
+    addMessage("user", ACTION_LABELS[action]);
+    ask({ action });
+  };
+}
+$("next").onclick = () => {
+  $("next").hidden = true;
+  addMessage("user", "Дальше →");
+  ask({ message: "Дальше" });
 };
 
 // голосовой ввод — только если браузер умеет (Chrome отправляет звук в Google)
