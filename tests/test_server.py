@@ -18,8 +18,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import agent as agent_mod  # noqa: E402
 import devtools  # noqa: E402
-import server  # noqa: E402
+import http_api  # noqa: E402
+import workspace  # noqa: E402
 
 
 def make_project(root: Path) -> None:
@@ -53,13 +55,13 @@ class Base(unittest.TestCase):
         make_project(self.root)
         self.notes = self.tmp / "notes"
         # общая память и список проектов — тоже во временной папке
-        self._paths = (server.SENPAI_PATH, server.RECENT_PATH)
-        server.SENPAI_PATH = self.notes / "_senpai.md"
-        server.RECENT_PATH = self.notes / "_projects.json"
-        self.ws = server.Workspace(self.root, self.notes / "proj.md")
+        self._paths = (workspace.SENPAI_PATH, workspace.RECENT_PATH)
+        workspace.SENPAI_PATH = self.notes / "_senpai.md"
+        workspace.RECENT_PATH = self.notes / "_projects.json"
+        self.ws = workspace.Workspace(self.root, self.notes / "proj.md")
 
     def tearDown(self):
-        server.SENPAI_PATH, server.RECENT_PATH = self._paths
+        workspace.SENPAI_PATH, workspace.RECENT_PATH = self._paths
         shutil.rmtree(self.tmp)
 
 
@@ -83,11 +85,11 @@ class WorkspaceTest(Base):
                          (32, "#ffffff", "none", "PYT"))
 
     def test_remember_is_capped(self):
-        for i in range(server.MAX_SENPAI_LINES + 5):
+        for i in range(workspace.MAX_SENPAI_LINES + 5):
             self.ws.remember(f"факт {i}")
-        lines = server.SENPAI_PATH.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(len(lines), server.MAX_SENPAI_LINES)
-        self.assertTrue(lines[-1].endswith(f"факт {server.MAX_SENPAI_LINES + 4}"))
+        lines = workspace.SENPAI_PATH.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), workspace.MAX_SENPAI_LINES)
+        self.assertTrue(lines[-1].endswith(f"факт {workspace.MAX_SENPAI_LINES + 4}"))
 
 
 class DevtoolsTest(Base):
@@ -109,7 +111,7 @@ class DevtoolsTest(Base):
 
 class AgentTest(Base):
     def make_agent(self, *messages):
-        agent = server.Agent(self.ws, "key", "model")
+        agent = agent_mod.Agent(self.ws, "key", "model")
         agent._llm = scripted(*messages)
         return agent
 
@@ -162,10 +164,10 @@ class AgentTest(Base):
 class HttpTest(Base):
     def setUp(self):
         super().setUp()
-        server.API_KEY, server.MODEL = "key", "model"
-        server.AGENTS.clear()
-        server.open_project(self.root)
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        http_api.API_KEY, http_api.MODEL = "key", "model"
+        http_api.AGENTS.clear()
+        http_api.open_project(self.root)
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), http_api.Handler)
         self.port = self.httpd.server_address[1]
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
 
@@ -197,12 +199,12 @@ class HttpTest(Base):
         other.mkdir()
         self.assertEqual(self.post("/api/project", {"path": str(other)}), (200, {"ok": True, "project": "other"}))
         self.assertEqual(self.post("/api/project", {"path": "/no/such/dir"})[0], 400)
-        self.assertEqual(server.recent_projects()[:2], [str(other), str(self.root)])
+        self.assertEqual(http_api.recent_projects()[:2], [str(other), str(self.root)])
 
 
 class QuestAndMemoryTest(Base):
     def test_auto_quest_and_event(self):
-        agent = server.Agent(self.ws, "key", "model")
+        agent = agent_mod.Agent(self.ws, "key", "model")
         agent._llm = scripted(
             {"role": "assistant", "content": None, "tool_calls": [tool_call("1", "write_notes", content="# x")]},
             {"role": "assistant", "content": "[happy] изучила!"},
@@ -216,12 +218,12 @@ class QuestAndMemoryTest(Base):
         self.assertIn("Нет такого шага", self.ws.call("complete_quest", {"step": "hack"}))
 
     def test_transcript_survives_restart(self):
-        agent = server.Agent(self.ws, "key", "model")
+        agent = agent_mod.Agent(self.ws, "key", "model")
         agent._llm = scripted({"role": "assistant", "content": "привет, семпай"})
         agent.run("привет", lambda ev: None)
         agent._llm = scripted({"role": "assistant", "content": "скучно"})
         agent.run("(служебное)", lambda ev: None, label="[idle]")
-        again = server.Agent(self.ws, "key", "model")  # «перезапуск сервера»
+        again = agent_mod.Agent(self.ws, "key", "model")  # «перезапуск сервера»
         self.assertEqual([m["content"] for m in again.transcript], ["привет", "привет, семпай", "скучно"])
         self.assertEqual(again.history[0], {"role": "user", "content": "привет"})
 
@@ -266,7 +268,7 @@ class GithubTest(Base):
 
 class ReminderAndWatchTest(Base):
     def test_reminder_validated_and_emitted(self):
-        agent = server.Agent(self.ws, "key", "model")
+        agent = agent_mod.Agent(self.ws, "key", "model")
         agent._llm = scripted(
             {"role": "assistant", "content": None, "tool_calls": [
                 tool_call("1", "set_reminder", minutes=0.1, text="рано"),
@@ -293,9 +295,9 @@ class ReminderAndWatchTest(Base):
 class SeasonTest(unittest.TestCase):
     def test_seasons(self):
         from datetime import date
-        self.assertIn("Хэллоуин", server.season_hint(date(2026, 10, 31)))
-        self.assertIn("новогодние", server.season_hint(date(2027, 1, 3)))
-        self.assertEqual(server.season_hint(date(2026, 7, 1)), "")
+        self.assertIn("Хэллоуин", agent_mod.season_hint(date(2026, 10, 31)))
+        self.assertIn("новогодние", agent_mod.season_hint(date(2027, 1, 3)))
+        self.assertEqual(agent_mod.season_hint(date(2026, 7, 1)), "")
 
 
 if __name__ == "__main__":
