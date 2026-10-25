@@ -151,6 +151,19 @@ class UiTest(unittest.TestCase):
         self.page.wait_for_selector("text=этот ответ стоил ~7¢")
         self.assertEqual(self.page.text_content("#spent"), "💸 0,34 $")
 
+    def test_skill_buttons(self):
+        sent = []
+
+        def chat(route):
+            sent.append(json.loads(route.request.post_data))
+            route.fulfill(body=json.dumps({"type": "reply", "text": "готово"}) + "\n")
+        self.page.route("**/api/chat", chat)
+        self.open()
+        btn = self.page.locator("#actions button.skill", has_text="Тесты")
+        btn.click()
+        self.page.wait_for_selector("text=готово")
+        self.assertEqual(sent[0]["action"], "skill:tests")
+
     def test_allowed_commands_in_menu(self):
         self.agent.ws.set_allowed("make lint", True)
         self.open()

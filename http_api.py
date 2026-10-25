@@ -124,6 +124,7 @@ class Handler(SimpleHTTPRequestHandler):
                 "model": agent.model,
                 "has_notes": agent.has_notes(),
                 "stale_commits": agent.ws.notes_staleness(),
+                "skills": [{"id": k, "title": v["title"], "hint": v["hint"]} for k, v in agent.ws.skills().items()],
                 "tts": edge_tts is not None,
                 "outfit": agent.ws.outfit(),
                 "has_doc": agent.ws.onboarding_path.is_file(),
@@ -241,8 +242,12 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(200, {"ok": True, "project": root.name})
 
         action = body.get("action")
-        text = TASKS.get(action) or str(body.get("message", "")).strip()
-        label = f"[{action}]" if action in TASKS else None
+        skill = agent.ws.skills().get(action[6:]) if isinstance(action, str) and action.startswith("skill:") else None
+        if skill:  # своя кнопка-задание: текст читаем заново — файл можно править без перезапуска
+            text, label = skill["prompt"], f"[{skill['title']}]"
+        else:
+            text = TASKS.get(action) or str(body.get("message", "")).strip()
+            label = f"[{action}]" if action in TASKS else None
         if not text:
             return self._json(400, {"error": "пустое сообщение"})
         try:

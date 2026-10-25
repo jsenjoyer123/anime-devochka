@@ -58,14 +58,15 @@ class Base(unittest.TestCase):
         make_project(self.root)
         self.notes = self.tmp / "notes"
         # общая память и список проектов — тоже во временной папке
-        self._paths = (workspace.SENPAI_PATH, workspace.RECENT_PATH, workspace.USAGE_PATH)
+        self._paths = (workspace.SENPAI_PATH, workspace.RECENT_PATH, workspace.USAGE_PATH, workspace.SKILLS_DIR)
         workspace.SENPAI_PATH = self.notes / "_senpai.md"
         workspace.RECENT_PATH = self.notes / "_projects.json"
         workspace.USAGE_PATH = self.notes / "_usage.json"
+        workspace.SKILLS_DIR = self.tmp / "skills"
         self.ws = workspace.Workspace(self.root, self.notes / "proj.md")
 
     def tearDown(self):
-        workspace.SENPAI_PATH, workspace.RECENT_PATH, workspace.USAGE_PATH = self._paths
+        workspace.SENPAI_PATH, workspace.RECENT_PATH, workspace.USAGE_PATH, workspace.SKILLS_DIR = self._paths
         shutil.rmtree(self.tmp)
 
 
@@ -249,6 +250,21 @@ class HttpTest(Base):
         self.assertEqual((status, body["ok"]), (200, True))
         self.assertEqual(http_api.AGENT.editor["path"], "src/app.py")
         self.assertEqual(self.post("/api/context", {"path": "/tmp"})[1]["ok"], False)
+
+    def test_skill_action(self):
+        (workspace.SKILLS_DIR).mkdir(parents=True)
+        (workspace.SKILLS_DIR / "hello.md").write_text("# 👋 Привет\nПоздоровайся с командой.", encoding="utf-8")
+        http_api.AGENT._llm = scripted({"role": "assistant", "content": "[wave] Привет, команда!"})
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/chat", data=b'{"action": "skill:hello"}',
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            events = [json.loads(line) for line in r.read().splitlines()]
+        self.assertEqual(events[-1]["type"], "reply")
+        self.assertEqual(http_api.AGENT.history[0]["content"], "Поздоровайся с командой.")
+        self.assertEqual(http_api.AGENT.transcript[-1]["content"], "[wave] Привет, команда!")
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/status", timeout=5) as r:
+            self.assertEqual(json.load(r)["skills"], [{"id": "hello", "title": "👋 Привет", "hint": ""}])
+        self.assertEqual(self.post("/api/chat", {"action": "skill:nope"})[0], 400)
 
     def test_annotations_endpoint(self):
         http_api.AGENT.set_annotations([{"path": "src/app.py", "line": 1, "message": "хм"}])
@@ -483,6 +499,31 @@ class DiffTest(Base):
         self.assertEqual(diff["title"], "diff · staged")
         self.assertEqual(len(diff["diff"].splitlines()), devtools.MAX_DIFF_LINES + 1)
         self.assertIn("сузь до файла", diff["diff"])
+
+
+class SkillsTest(Base):
+    def write(self, folder: Path, name: str, text: str) -> None:
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / name).write_text(text, encoding="utf-8")
+
+    def test_skill_files(self):
+        self.write(workspace.SKILLS_DIR, "tests.md", "# 🧪 Тесты\n> прогнать\n\nЗапусти тесты.")
+        self.write(workspace.SKILLS_DIR, "lint.md", "# Линт\nЗапусти линтер.")
+        self.write(workspace.SKILLS_DIR, "Bad Name.md", "# Плохое имя\nx")
+        self.write(workspace.SKILLS_DIR, "notitle.md", "без заголовка")
+        self.write(workspace.SKILLS_DIR, "empty.md", "# Пусто\n> только подсказка")
+        # проектный скилл с тем же именем важнее общего
+        self.write(self.root / ".aiko" / "skills", "lint.md", "# Наш линт\nmake lint, пожалуйста.")
+        skills = self.ws.skills()
+        self.assertEqual(sorted(skills), ["lint", "tests"])
+        self.assertEqual(skills["tests"], {"title": "🧪 Тесты", "hint": "прогнать", "prompt": "Запусти тесты."})
+        self.assertEqual((skills["lint"]["title"], skills["lint"]["prompt"]), ("Наш линт", "make lint, пожалуйста."))
+
+    def test_bundled_skills_parse(self):
+        workspace.SKILLS_DIR = workspace.HERE / "skills"
+        skills = self.ws.skills()
+        self.assertIn("tests", skills)
+        self.assertTrue(all(v["title"] and v["prompt"] for v in skills.values()))
 
 
 class StaleNotesTest(Base):

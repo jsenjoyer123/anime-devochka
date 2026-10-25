@@ -16,6 +16,7 @@ from quest import Quest
 HERE = Path(__file__).resolve().parent
 NOTES_DIR = HERE / "notes"
 SENPAI_PATH = NOTES_DIR / "_senpai.md"      # что Айко помнит о семпае — общее для всех проектов
+SKILLS_DIR = HERE / "skills"                 # свои кнопки-задания: skills/*.md
 RECENT_PATH = NOTES_DIR / "_projects.json"  # недавние проекты для переключателя
 USAGE_PATH = NOTES_DIR / "_usage.json"      # расходы OpenRouter по дням
 MAX_SENPAI_LINES = 60
@@ -28,6 +29,9 @@ MAX_READ_CHARS = 20_000     # символов файла за одно чтен
 MAX_FILE_BYTES = 2_000_000  # файлы крупнее не ищем по ним
 MAX_LIST_ENTRIES = 300
 MAX_SHOW_LINES = 60  # строк кода на экран стрима за один раз
+MAX_SKILLS = 12
+MAX_SKILL_CHARS = 6_000
+SKILL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,40}$")
 
 IGNORED_DIRS = {
     ".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv", "env",
@@ -237,6 +241,30 @@ class Workspace:
             return 0
         n = devtools.commits_since(self.root, written)
         return n if n >= STALE_AFTER_COMMITS else 0
+
+    def skills(self) -> dict[str, dict]:
+        """Кнопки-задания: skills/*.md самой Айко и .aiko/skills/*.md проекта (проектные важнее).
+        Формат: «# Название» первой строкой, «> подсказка» по желанию, дальше — текст задания."""
+        found: dict[str, dict] = {}
+        for folder in (SKILLS_DIR, self.root / ".aiko" / "skills"):
+            try:
+                files = sorted(folder.glob("*.md"))
+            except OSError:
+                continue
+            for f in files:
+                if not SKILL_ID_RE.match(f.stem) or not f.is_file():
+                    continue
+                try:
+                    lines = f.read_text(encoding="utf-8")[:MAX_SKILL_CHARS].splitlines()
+                except (OSError, UnicodeDecodeError):
+                    continue
+                if not lines or not lines[0].startswith("# "):
+                    continue
+                hint = lines[1][2:].strip() if len(lines) > 1 and lines[1].startswith("> ") else ""
+                prompt = "\n".join(lines[2 if hint else 1:]).strip()
+                if prompt:
+                    found[f.stem] = {"title": lines[0][2:].strip()[:24], "hint": hint[:200], "prompt": prompt}
+        return dict(list(found.items())[:MAX_SKILLS])
 
     def project_memory(self) -> str:
         return self.memory_path.read_text(encoding="utf-8") if self.memory_path.is_file() else ""

@@ -847,14 +847,29 @@ const ACTION_LABELS = {
   quiz: "Айко, устрой мне экзамен по проекту 🎓",
   commit: "Айко, помоги закоммитить ✅",
 };
-for (const btn of document.querySelectorAll("#actions button")) {
+function bindAction(btn) {
   btn.onclick = () => {
     const action = btn.dataset.action;
     touring = action === "tour";
     $("next").hidden = true;
-    addMessage("user", ACTION_LABELS[action]);
+    addMessage("user", ACTION_LABELS[action] || `Айко, ${btn.textContent} ✨`);
     ask({ action });
   };
+}
+for (const btn of document.querySelectorAll("#actions button")) bindAction(btn);
+
+/** Свои кнопки-задания из skills/*.md (и .aiko/skills/ проекта). */
+function renderSkills(skills) {
+  for (const old of document.querySelectorAll("#actions button.skill")) old.remove();
+  for (const sk of skills || []) {
+    const b = Object.assign(document.createElement("button"), {
+      type: "button", className: "skill", textContent: sk.title, title: sk.hint || sk.title,
+    });
+    b.dataset.action = `skill:${sk.id}`;
+    b.disabled = sendBtn.disabled;
+    bindAction(b);
+    $("actions").append(b);
+  }
 }
 $("next").onclick = () => {
   $("next").hidden = true;
@@ -964,6 +979,7 @@ async function refreshStatus() {
       : s.stale_commits ? `🔄 Переизучить проект (+${s.stale_commits} коммитов)` : "🔄 Переизучить проект";
     learnBtn.classList.toggle("stale", Boolean(s.stale_commits));
     renderQuest(s.quest);
+    renderSkills(s.skills);
     if (!greeted) {
       greeted = true;
       // чат с прошлого раза: сервер помнит последние реплики
