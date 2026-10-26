@@ -1053,6 +1053,20 @@ function endPtt() {
   }
 }
 
+const plural = (n, [one, few, many]) =>
+  n % 10 === 1 && n % 100 !== 11 ? one : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? few : many;
+
+/** «Где мы остановились»: открытые задачи плана, незакоммиченные правки, конфликты — для приветствия. */
+async function whereWeStopped(s) {
+  const open = (s.tasks || []).filter((t) => !t.done);
+  const ch = await fetch("/api/changes").then((r) => r.json()).catch(() => null);
+  const parts = [];
+  if (open.length) parts.push(`в плане ${open.length} ${plural(open.length, ["задача", "задачи", "задач"])}, первая — «${open[0].text}»`);
+  if (ch?.conflicts?.length) parts.push(`есть конфликты слияния в ${ch.conflicts.length} ${plural(ch.conflicts.length, ["файле", "файлах", "файлах"])}`);
+  else if (ch?.files?.length) parts.push(`в рабочей копии ${ch.files.length} ${plural(ch.files.length, ["изменённый файл", "изменённых файла", "изменённых файлов"])}`);
+  return parts.length ? ` [think] Где мы остановились: ${parts.join("; ")}.` : "";
+}
+
 let greeted = OBS;
 async function refreshStatus() {
   try {
@@ -1073,11 +1087,12 @@ async function refreshStatus() {
       greeted = true;
       // чат с прошлого раза: сервер помнит последние реплики
       for (const m of s.transcript || []) addMessage(m.role === "user" ? "user" : "aiko", stripTags(m.content));
-      const hello = s.has_notes && s.stale_commits
+      const greeting = s.has_notes && s.stale_commits
         ? `[happy] [wave] С возвращением, семпай! [surprised] Ого, в ${s.project} уже ${s.stale_commits} новых коммитов с тех пор, как я его изучала. Нажми «Переизучить», и я догоню!`
         : s.has_notes
         ? `[happy] [wave] С возвращением, семпай! Я помню проект ${s.project} по своим заметкам. Спрашивай что угодно!`
         : `[happy] [wave] Привет, семпай! Я Айко, твоя новая коллега. [surprised] Проект ${s.project} я ещё не видела — нажми «Изучить проект», и я всё-всё разберу!`;
+      const hello = greeting + (s.has_notes ? await whereWeStopped(s) : "");
       addMessage("aiko", stripTags(hello));
       // до первого клика браузер не даст ей заговорить — ждём его
       if (audioCtx) {
@@ -1177,6 +1192,14 @@ input.addEventListener("paste", (e) => {
   const text = e.clipboardData?.getData("text") || "";
   if (TRACE_HINT.test(text)) quip(pick(["[surprised] Ой, стектрейс! Отправляй — найду, где болит.", "[think] Так-так, ошибочка... Жми «отправить», разберу по коду."]));
 });
+
+// клик по строке кода на экране стрима — готовый вопрос в поле ввода (можно дописать)
+if (!OBS) {
+  document.addEventListener("aiko-line", ({ detail: { path, line, text } }) => {
+    input.value = `Что делает строка \`${path}:${line}\` (${text.trim().slice(0, 60)})?`;
+    input.focus();
+  });
+}
 
 // семпай начал печатать — замолкаем, как на стриме, когда чат перебивает
 input.addEventListener("keydown", () => {
@@ -1342,6 +1365,7 @@ async function pollChanges() {
     addMessage("error", "Следить за правками умею только в git-проектах.");
     return;
   }
+  noticeConflicts(c.conflicts || []);
   if (lastSig === null) { lastSig = c.sig; lastHead = c.head; return; } // первый опрос — точка отсчёта
   if (c.head && c.head !== lastHead) {
     // новый коммит: правки ушли в историю, предлагать ревью уже поздно — лучше прокомментировать
@@ -1368,6 +1392,23 @@ async function pollChanges() {
   $("offer").hidden = false;
 }
 if (!OBS) setInterval(pollChanges, WATCH_EVERY_MS);
+// конфликты слияния: замечаем новый набор файлов и предлагаем помощь (один раз на набор)
+let conflictsSeen = "";
+function noticeConflicts(files) {
+  const key = files.join("\n");
+  $("conflicts").hidden = !files.length;
+  if (!files.length || key === conflictsSeen) { conflictsSeen = key; return; }
+  conflictsSeen = key;
+  const names = files.slice(0, 3).map((f) => `\`${f}\``).join(", ") + (files.length > 3 ? ` и ещё ${files.length - 3}` : "");
+  addMessage("aiko", `⚔️ Конфликты слияния: ${names}. Помочь разрулить?`);
+  quip("[surprised] Ой, семпай, у тебя конфликты при слиянии! Давай разрулю?");
+}
+$("conflicts").onclick = () => {
+  $("conflicts").hidden = true;
+  addMessage("user", "Айко, помоги разрулить конфликты ⚔️");
+  ask({ action: "conflicts" });
+};
+
 $("offer").onclick = () => {
   $("offer").hidden = true;
   addMessage("user", ACTION_LABELS.review);

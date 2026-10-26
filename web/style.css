@@ -432,3 +432,5 @@ body.embed #drop-hint { display: none; }
   background: #fff8fc; border-radius: 8px; padding: 8px; }
 .msg.pr button { font-size: 12px; padding: 5px 10px; background: #e9e4ff; }
 #actions button.skill { background: #efe9ff; }
+html:not(.obs) #screen-body pre:not(.diff) span { cursor: pointer; }
+html:not(.obs) #screen-body pre:not(.diff) span:hover { background: rgba(255, 143, 199, .14); }

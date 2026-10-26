@@ -25,6 +25,7 @@ CONFIRM_TIMEOUT = 300       # сколько ждём, пока семпай н�
 EDITOR_FRESH_SEC = 15 * 60  # контекст редактора старше этого считаем устаревшим
 MAX_EDITOR_SELECTION = 4_000
 MAX_SUMMARY_CHARS = 2_500   # резюме старого разговора в системном промпте
+MAX_EDIT_HISTORY = 20       # столько своих правок можно откатить
 MAX_ANNOTATIONS = 50        # замечаний ревью в редакторе за раз
 SEVERITIES = ["error", "warning", "info"]
 
@@ -65,7 +66,8 @@ git_hotspots, git_diff. Команды (тесты, сборку, линтер) 
 Ты умеешь править код: edit_file с точечными заменами (old — фрагмент, скопированный из read_file \
 символ в символ, с отступами, но без номеров строк) или content для нового файла. Семпай увидит diff \
 на экране и нажмёт «Применить» — без этого ничего не запишется. Правь только то, о чём договорились, \
-маленькими шагами; перед правкой прочитай файл, после — предложи прогнать тесты.
+маленькими шагами; перед правкой прочитай файл, после — предложи прогнать тесты. Свои последние \
+правки можно откатить через undo_edit, если семпай просит «верни как было».
 
 Ты помогаешь коммитить: посмотри git_diff (staged=true и без), придумай сообщение коммита \
 в стиле истории проекта (загляни в git_log) и вызови commit — семпай увидит сообщение, \
@@ -133,6 +135,13 @@ NEW_COMMIT_TASK = """(Системное событие, не сообщение
 одной-двумя фразами, как стример: похвали, подколи или удивись по сути изменений \
 («о, рефакторинг auth, смело!»). Если это не новый коммит, а pull или смена ветки — отреагируй на это. \
 Ничего не показывай на экране и ревью не устраивай."""
+
+CONFLICTS_TASK = """У семпая незавершённое слияние с конфликтами. Посмотри git_diff (там список файлов \
+со статусом UU/AA и т.п.) и для каждого конфликтного файла прочитай его через read_file: между \
+<<<<<<< и ======= — «наша» сторона, между ======= и >>>>>>> — «их». Пойми, что хотела каждая сторона \
+(git_log по файлу поможет), и предложи разрешение через edit_file: замени блок с маркерами целиком на \
+итоговый код, сохранив смысл обеих сторон. Если неясно, что выбрать, — спроси семпая, не угадывай. \
+Когда файл разрешён, предложи run_command `git add <файл>`; коммит слияния семпай сделает сам."""
 
 PR_TASK = """Семпай хочет открыть pull request. Посмотри branch_diff (что в ветке против основной) \
 и git_log основной ветки — какой там стиль. Напиши PR: заголовок до 70 символов и описание в Markdown \
@@ -226,7 +235,7 @@ LEARN_TASK = """Семпай попросил тебя пройти онборд
 # сценарные задания: кнопки и служебные события подставляют текст вместо сообщения семпая
 TASKS = {"learn": LEARN_TASK, "idle": IDLE_TASK, "tour": TOUR_TASK, "review": REVIEW_TASK,
          "doc": DOC_TASK, "first_task": FIRST_TASK, "quiz": QUIZ_TASK, "commit": COMMIT_TASK, "ci_fail": CI_FAIL_TASK,
-         "pr": PR_TASK,
+         "pr": PR_TASK, "conflicts": CONFLICTS_TASK,
          "new_commit": NEW_COMMIT_TASK}
 
 TOOLS = [
@@ -453,6 +462,14 @@ TOOLS = [
         }, "required": ["path", "reason"]},
     }},
     {"type": "function", "function": {
+        "name": "undo_edit",
+        "description": "Откатить твою последнюю применённую правку файла (или указанного файла), "
+                       "если его не меняли после неё. Семпай подтвердит.",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string", "description": "Какой файл; по умолчанию — последняя правка"},
+        }},
+    }},
+    {"type": "function", "function": {
         "name": "commit",
         "description": "Сделать git commit (без push). Семпай увидит сообщение и файлы, может поправить "
                        "сообщение и должен подтвердить.",
@@ -538,6 +555,8 @@ def describe_call(name: str, args: dict) -> str:
         return "готовлю коммит ✎"
     if name == "edit_file":
         return f"хочу поправить {args.get('path')} ✎"
+    if name == "undo_edit":
+        return "хочу откатить свою правку ↶"
     if name == "undo_commit":
         return "хочу отменить свой коммит ↶"
     if name.startswith("github_"):
@@ -571,7 +590,8 @@ class Agent:
         self.pending: dict[str, dict] = {}  # запросы на запуск команд: id → {event, approved}
         self.mood = 0.0  # -1 обижена … +1 счастлива; присылает браузер
         self.editor: dict | None = None  # что открыто у семпая в редакторе; присылает расширение VS Code
-        self.annotations = {"version": 0, "notes": []}  # замечания ревью; забирает расширение VS Code
+        self.annotations = {"version": 0, "notes": []}
+        self.edits: list[dict] = []  # применённые правки (последние MAX_EDIT_HISTORY) — для undo_edit  # замечания ревью; забирает расширение VS Code
         if ws.notes_path.is_file():
             ws.quest.complete("learn")  # проект изучали до появления квеста — засчитываем
         self.transcript: list[dict] = self._load_transcript()  # то, что видно в чате
@@ -887,6 +907,8 @@ class Agent:
                 return self._run_confirmed(str(args["command"]), str(args.get("reason") or ""), emit)
             if name == "edit_file":
                 return self._edit_confirmed(args, emit)
+            if name == "undo_edit":
+                return self._undo_edit(args.get("path"), emit)
             if name == "commit":
                 return self._commit_confirmed(str(args["message"]), args.get("add_all") is True, emit)
             if name == "undo_commit":
@@ -987,6 +1009,23 @@ class Agent:
         content = args.get("content")
         edits = args.get("edits") or ([{"old": args.get("old"), "new": args.get("new", "")}] if "old" in args else None)
         plan = self.ws.plan_edit(str(args["path"]), edits, None if content is None else str(content))
+        result = self._apply_confirmed(plan, str(args.get("reason") or ""), emit)
+        if result.startswith(("Поправила", "Создала")):
+            self.edits = (self.edits + [plan])[-MAX_EDIT_HISTORY:]
+        return result
+
+    def _undo_edit(self, path, emit) -> str:
+        """Откат своей правки: тот же путь через diff и «Применить»."""
+        rel = self.ws._rel(self.ws._resolve(str(path))) if path else None
+        plan = next((p for p in reversed(self.edits) if rel in (None, p["path"])), None)
+        if plan is None:
+            return "Откатывать нечего: в этом разговоре я такой файл не правила."
+        result = self._apply_confirmed(self.ws.revert_plan(plan), "откат моей правки", emit)
+        if not result.startswith(("Семпай", "Ошибка")):
+            self.edits.remove(plan)
+        return result
+
+    def _apply_confirmed(self, plan: dict, reason: str, emit) -> str:
         lines = plan["diff"].splitlines()
         added = sum(1 for x in lines if x.startswith("+") and not x.startswith("+++"))
         removed = sum(1 for x in lines if x.startswith("-") and not x.startswith("---"))
@@ -994,7 +1033,7 @@ class Agent:
                                                            if len(lines) > devtools.MAX_DIFF_LINES else []))
         emit({"type": "diff", "title": f"{plan['path']} · {'новый файл' if plan['new'] else 'правка'}", "diff": shown})
         answer = self._confirm({"kind": "edit", "path": plan["path"], "new": plan["new"], "added": added,
-                                "removed": removed, "reason": str(args.get("reason") or "")[:300]}, emit)
+                                "removed": removed, "reason": reason[:300]}, emit)
         if answer is None:
             return "Семпай не ответил — файл не трогала."
         if not answer["approved"]:

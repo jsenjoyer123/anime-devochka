@@ -268,6 +268,43 @@ class UiTest(unittest.TestCase):
         self.page.wait_for_selector("text=✅ Скопировано")
         self.assertEqual(self.page.evaluate("navigator.clipboard.readText()"), "Семёрка вместо 42\n\n## Зачем\n- потому что")
 
+    def test_conflicts_offer(self):
+        self.page.route("**/api/changes", lambda route: route.fulfill(json={
+            "git": True, "sig": "s", "files": ["a.py", "b.py"], "conflicts": ["a.py", "b.py"], "head": "h"}))
+        self.page.add_init_script("localStorage.setItem('aiko-watch', '1')")
+        self.page.clock.install()
+        self.open()
+        self.page.clock.fast_forward(31_000)
+        self.page.wait_for_selector("text=⚔️ Конфликты слияния: a.py, b.py. Помочь разрулить?")
+        self.page.clock.fast_forward(31_000)  # тот же набор — второй раз не объявляет
+        self.assertEqual(self.page.locator("text=Конфликты слияния").count(), 1)
+        sent = []
+        self.page.route("**/api/chat", lambda route: sent.append(json.loads(route.request.post_data)["action"])
+                        or route.fulfill(body=json.dumps({"type": "reply", "text": "разруливаю"}) + "\n"))
+        self.page.click("#conflicts")
+        self.page.wait_for_selector("text=разруливаю")
+        self.assertEqual(sent, ["conflicts"])
+
+    def test_click_line_on_screen(self):
+        self.chat_replies({"type": "code", "path": "app.py", "start": 10, "caption": "", "code": "a = 1\nprint('hi')"},
+                          {"type": "reply", "text": "вот"})
+        self.open()
+        self.say("покажи")
+        self.page.click("#screen pre span:nth-child(2)")
+        self.assertEqual(self.page.input_value("#input"), "Что делает строка `app.py:11` (print('hi'))?")
+
+    def test_where_we_stopped(self):
+        ws = self.agent.ws
+        ws.write_notes("# заметки")
+        ws.tasks.add("починить CI")
+        ws.tasks.add("README")
+        self.addCleanup(lambda: (ws.notes_path.unlink(), ws.tasks.path.unlink()))
+        self.page.route("**/api/changes", lambda route: route.fulfill(json={
+            "git": True, "sig": "s", "files": ["a.py", "b.py", "c.py"], "conflicts": [], "head": "h"}))
+        self.open()
+        self.page.wait_for_selector("text=Где мы остановились: в плане 2 задачи, первая — «починить CI»; "
+                                    "в рабочей копии 3 изменённых файла.")
+
     def test_allowed_commands_in_menu(self):
         self.agent.ws.set_allowed("make lint", True)
         self.open()
@@ -316,7 +353,8 @@ class MicTest(UiTest):
     # тесты родителя здесь не повторяем
     test_page_loads = test_run_confirm_allow_always = test_commit_message_is_editable = None
     test_undo_confirm = test_diff_on_screen = test_spent_counter_and_expensive_turn = test_edit_confirm = None
-    test_skill_buttons = test_allowed_commands_in_menu = test_twitch_chat = test_task_plan = test_ci_watch = test_pr_card = None
+    test_skill_buttons = test_allowed_commands_in_menu = test_twitch_chat = test_task_plan = test_ci_watch = test_pr_card = test_conflicts_offer = None
+    test_click_line_on_screen = test_where_we_stopped = None
 
     def heard(self, *texts):
         """Распознавание отдаёт фразы по очереди, потом — пустоту."""

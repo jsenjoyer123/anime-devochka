@@ -351,12 +351,26 @@ class Workspace:
         with p.open(encoding="utf-8", newline="") as f:  # без перевода \r\n → \n
             return f.read()
 
+    def revert_plan(self, plan: dict) -> dict:
+        """Обратная правка: вернуть файл к виду до plan, если после неё его никто не менял."""
+        p = self._resolve(plan["path"])
+        now = self._read_raw(p).replace("\r\n", "\n") if p.is_file() else None
+        if now != plan["after"]:
+            raise ValueError(f"{plan['path']} уже поменяли после моей правки — откатывать вслепую не буду")
+        diff = "".join(difflib.unified_diff(plan["after"].splitlines(keepends=True), plan["before"].splitlines(keepends=True),
+                                            f"a/{plan['path']}", "/dev/null" if plan["new"] else f"b/{plan['path']}"))
+        return {**plan, "before": plan["after"], "after": plan["before"], "diff": diff, "revert_new": plan["new"],
+                "new": False}
+
     def apply_edit(self, plan: dict) -> str:
         """Записываем подтверждённую правку, если файл не изменился с момента plan_edit."""
         p = self._resolve(plan["path"])
         now = self._read_raw(p).replace("\r\n", "\n") if p.is_file() else ""
         if now != plan["before"] or (plan["new"] and p.exists()):
             raise ValueError(f"{plan['path']} изменился, пока семпай смотрел, — перечитай и предложи заново")
+        if plan.get("revert_new"):  # откат создания файла — файл удаляем
+            p.unlink()
+            return f"Удалила созданный мной {plan['path']}"
         p.parent.mkdir(parents=True, exist_ok=True)
         with p.open("w", encoding="utf-8", newline="") as f:  # переводы строк — как были в файле
             f.write(plan["after"].replace("\n", "\r\n") if plan["crlf"] else plan["after"])

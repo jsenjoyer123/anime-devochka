@@ -135,16 +135,21 @@ def branch_diff(root: Path, base: str | None = None) -> str:
     return f"Ветка {branch} против {base}.\nКоммиты:\n{log}\n\n{stat}\n\n{patch}"[:MAX_GIT_CHARS]
 
 
+CONFLICT_CODES = {"UU", "AA", "DD", "AU", "UA", "DU", "UD"}  # git status: незавершённое слияние
+
+
 def changes(root: Path) -> dict:
     """Что поменялось в рабочей копии: подпись (чтобы заметить новые правки) и список файлов."""
     status = _git(root, "status", "--porcelain=v1", "--untracked-files=normal")
     if status.startswith(("Это не", "git ")):
-        return {"git": False, "sig": "", "files": []}
+        return {"git": False, "sig": "", "files": [], "conflicts": []}
     numstat = _git(root, "diff", "--numstat", "--no-ext-diff", "--no-textconv")
     # _git срезает пробелы по краям, поэтому у первой строки может не быть ведущего пробела статуса
-    files = [line.split(maxsplit=1)[1] for line in status.splitlines() if len(line.split(maxsplit=1)) == 2]
+    rows = [line.split(maxsplit=1) for line in status.splitlines() if len(line.split(maxsplit=1)) == 2]
+    files = [path for _, path in rows]
+    conflicts = [path for code, path in rows if code in CONFLICT_CODES]
     sig = hashlib.sha1((status + numstat).encode()).hexdigest() if files else ""
-    return {"git": True, "sig": sig, "files": files[:50], "head": head(root)}
+    return {"git": True, "sig": sig, "files": files[:50], "conflicts": conflicts[:50], "head": head(root)}
 
 
 def commits_since(root: Path, timestamp: float) -> int:

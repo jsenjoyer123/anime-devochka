@@ -678,6 +678,38 @@ class EditTest(Base):
         agent.run("поправь", emit)
         return [m["content"] for m in agent.history if m["role"] == "tool"][0], events
 
+    def run_calls(self, agent, *calls, approve=True):
+        agent._llm = scripted({"role": "assistant", "content": None, "tool_calls": list(calls)},
+                              {"role": "assistant", "content": "ок"})
+
+        def emit(ev):
+            if ev["type"] == "confirm":
+                threading.Timer(0.05, agent.resolve_confirm, (ev["id"], approve)).start()
+        agent.run("go", emit)
+        return [m["content"] for m in agent.history if m["role"] == "tool"][-len(calls):]
+
+    def test_undo_edit(self):
+        agent = agent_mod.Agent(self.ws, "key", "model")
+        app = self.root / "src" / "app.py"
+        original = app.read_text()
+        self.assertIn("Откатывать нечего", self.run_calls(agent, tool_call("0", "undo_edit"))[0])
+        self.run_calls(agent, tool_call("1", "edit_file", path="src/app.py", old="42", new="43", reason="r"),
+                       tool_call("2", "edit_file", path="notes.txt", content="заметка\n", reason="r"))
+        self.assertTrue((self.root / "notes.txt").exists())
+        # без пути — последняя правка: созданный файл удаляется
+        self.assertIn("Удалила", self.run_calls(agent, tool_call("3", "undo_edit"))[0])
+        self.assertFalse((self.root / "notes.txt").exists())
+        # отказ семпая — правка остаётся и её можно откатить позже
+        self.assertIn("не захотел", self.run_calls(agent, tool_call("4", "undo_edit", path="src/app.py"), approve=False)[0])
+        self.assertIn("return 43", app.read_text())
+        # файл поменяли после её правки — вслепую не откатывает
+        app.write_text(app.read_text() + "# правка семпая\n")
+        self.assertIn("уже поменяли", self.run_calls(agent, tool_call("5", "undo_edit", path="src/app.py"))[0])
+        app.write_text(app.read_text().replace("# правка семпая\n", ""))
+        self.assertIn("Поправила", self.run_calls(agent, tool_call("6", "undo_edit", path="src/app.py"))[0])
+        self.assertEqual(app.read_text(), original)
+        self.assertEqual(agent.edits, [])
+
     def test_agent_edit_flow(self):
         result, events = self.run_edit(True, path="src/app.py", old="42", new="43")
         self.assertEqual([e["type"] for e in events if e["type"] in ("diff", "confirm", "edited")],
@@ -700,6 +732,28 @@ class EditTest(Base):
                                                                        {"old": "43", "new": "44"}])
         self.assertIn("+2 −2", result)
         self.assertEqual((self.root / "src" / "app.py").read_text(), "def run():\n    return 44\n")
+
+
+class ConflictTest(GitUserBase):
+    def test_real_merge_conflict(self):
+        git = ["git", "-C", str(self.root)]
+        subprocess.run([*git, "checkout", "-q", "--", "."], check=True)
+        subprocess.run([*git, "checkout", "-qb", "other"], check=True)
+        (self.root / "src" / "app.py").write_text("def main():\n    return 1\n", encoding="utf-8")
+        subprocess.run([*git, "commit", "-qam", "один"], check=True)
+        subprocess.run([*git, "checkout", "-q", "-"], check=True)
+        (self.root / "src" / "app.py").write_text("def main():\n    return 2\n", encoding="utf-8")
+        subprocess.run([*git, "commit", "-qam", "два"], check=True)
+        merge = subprocess.run([*git, "merge", "-q", "other"], capture_output=True, text=True)
+        self.assertNotEqual(merge.returncode, 0)
+        self.assertEqual(devtools.changes(self.root)["conflicts"], ["src/app.py"])
+        # разрешение конфликта — обычная правка блока с маркерами
+        text = (self.root / "src" / "app.py").read_text()
+        block = text[text.index("<<<<<<<"):text.index(">>>>>>> other") + len(">>>>>>> other\n")]
+        self.ws.apply_edit(self.ws.plan_edit("src/app.py", [{"old": block, "new": "    return 1 + 2\n"}]))
+        self.assertEqual((self.root / "src" / "app.py").read_text(), "def main():\n    return 1 + 2\n")
+        subprocess.run([*git, "add", "src/app.py"], check=True)
+        self.assertEqual(devtools.changes(self.root)["conflicts"], [])
 
 
 class PrTest(GitUserBase):

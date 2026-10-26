@@ -27,7 +27,7 @@ export function hideScreen() {
 }
 
 export function showCode({ path, start, code, caption }) {
-  push({ kind: "code", title: `${path}:${start}${caption ? ` — ${caption}` : ""}`, start, code });
+  push({ kind: "code", title: `${path}:${start}${caption ? ` — ${caption}` : ""}`, path, start, code });
 }
 
 export function showDiff({ title, diff }) {
@@ -57,14 +57,16 @@ function go(i) {
   else renderDiagram(item);
 }
 
-function renderCode({ start, code }) {
+function renderCode({ path, start, code }) {
   const pre = document.createElement("pre");
   pre.style.setProperty("--start", String(start - 1));
-  for (const line of code.split("\n")) {
+  code.split("\n").forEach((line, i) => {
     const span = document.createElement("span");
     span.textContent = line || " ";
+    // клик по строке — спросить Айко именно про неё (app.js подставит вопрос в поле ввода)
+    span.onclick = () => document.dispatchEvent(new CustomEvent("aiko-line", { detail: { path, line: start + i, text: line } }));
     pre.append(span);
-  }
+  });
   body.replaceChildren(pre);
 }
 
