@@ -331,6 +331,18 @@ class HttpTest(Base):
         self.assertEqual(self.post("/api/annotations", {"clear": True}), (200, {"ok": True}))
         self.assertEqual(http_api.AGENT.annotations, {"version": 2, "notes": []})
 
+    def test_autotest(self):
+        ws = http_api.AGENT.ws
+        self.assertEqual(self.post("/api/autotest", {}), (200, {"command": None}))
+        ws.set_allowed("rm -rf build", True)  # разрешена, но это не тесты — в фоне не запускаем
+        self.assertEqual(self.post("/api/autotest", {})[1], {"command": None})
+        ws.set_allowed("echo unittest-fail && exit 3", True)
+        status, r = self.post("/api/autotest", {})
+        self.assertEqual((r["command"], r["ok"]), ("echo unittest-fail && exit 3", False))
+        self.assertIn("unittest-fail", r["output"])
+        ws.set_allowed("echo pytest-ok", True)  # берётся последняя разрешённая тестовая команда
+        self.assertEqual(self.post("/api/autotest", {})[1]["ok"], True)
+
     def test_allowed_can_only_be_revoked(self):
         http_api.AGENT.ws.set_allowed("make test", True)
         self.assertEqual(self.post("/api/allowed", {"command": "make test"}), (200, {"allowed": []}))
@@ -578,6 +590,15 @@ class UndoCommitTest(GitUserBase):
         result, events = self.undo()
         self.assertIn("запушен", result)
         self.assertFalse([e for e in events if e["type"] == "confirm"])
+
+
+class TestCommandTest(Base):
+    def test_detection(self):
+        for cmd in ["pytest -q", "python -m unittest discover", "npm test", "npm run test -- --watch=false",
+                    "go test ./...", "cargo test", "make test", "yarn test"]:
+            self.assertRegex(cmd, workspace.TEST_COMMAND_RE, cmd)
+        for cmd in ["npm run build", "make", "ls", "pytesting", "go build"]:
+            self.assertNotRegex(cmd, workspace.TEST_COMMAND_RE, cmd)
 
 
 class TasksTest(Base):

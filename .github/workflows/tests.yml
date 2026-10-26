@@ -35,7 +35,7 @@ jobs:
         with:
           node-version: "22"
       - name: "Расширение VS Code (vscode подменён заглушкой)"
-        run: node --test tests/vscode
+        run: node --test tests/vscode/*.test.js  # Node 22 не принимает каталог
 
   e2e:
     runs-on: ubuntu-latest

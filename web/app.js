@@ -1383,6 +1383,7 @@ async function pollChanges() {
   if (c.sig !== pendingSig) { pendingSig = c.sig; return; }
   lastSig = c.sig;
   pendingSig = null;
+  autotest(); // правки устоялись — прогоним тесты, если семпай разрешил команду «всегда»
   if (!c.sig || performance.now() - lastOffer < OFFER_COOLDOWN_MS || sendBtn.disabled) return;
   lastOffer = performance.now();
   const more = c.files.length > 2 ? ` и ещё ${c.files.length - 2}` : "";
@@ -1392,6 +1393,39 @@ async function pollChanges() {
   $("offer").hidden = false;
 }
 if (!OBS) setInterval(pollChanges, WATCH_EVERY_MS);
+// 🧪 фоновые тесты: после устоявшихся правок, только разрешённой «всегда» командой
+let testsFailed = false;  // прошлый прогон был красным — следующий зелёный стоит отпраздновать
+let lastTestOutput = "";
+async function autotest() {
+  let r;
+  try {
+    const res = await fetch("/api/autotest", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    if (!res.ok) return;
+    r = await res.json();
+  } catch { return; }
+  if (!r.command) return;
+  if (r.ok) {
+    $("tests-fix").hidden = true;
+    if (testsFailed) {
+      addMessage("tool", `🧪 \`${r.command}\` снова зелёные`);
+      enqueueSpeech(pick(["[cheer] Тесты снова зелёные! Починилось, семпай!", "[happy] [clap] Ура, всё прошло!"]));
+    }
+    testsFailed = false;
+    return;
+  }
+  lastTestOutput = r.output;
+  if (testsFailed) return; // уже сказала — не повторяемся на каждую правку
+  testsFailed = true;
+  addMessage("aiko", `🧪 После твоих правок упали тесты (\`${r.command}\`). Разобрать?`);
+  enqueueSpeech("[surprised] Ой, семпай, тесты покраснели после твоей правки! Хочешь, разберусь?");
+  $("tests-fix").hidden = false;
+}
+$("tests-fix").onclick = () => {
+  $("tests-fix").hidden = true;
+  addMessage("user", "Айко, разберись, почему упали тесты 🧪");
+  ask({ message: `Тесты упали после моих правок. Вот конец вывода — найди причину в коде и предложи исправление:\n\n${lastTestOutput}` });
+};
+
 // конфликты слияния: замечаем новый набор файлов и предлагаем помощь (один раз на набор)
 let conflictsSeen = "";
 function noticeConflicts(files) {

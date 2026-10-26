@@ -56,6 +56,8 @@ aiko ~/path/to/project
 - Помнит семпая во всех проектах (`notes/_senpai.md`), а договорённости и поправки своих ошибок
   по проекту — отдельно (`notes/<проект>.memory.md`, переживает «Переизучить»). Проекты переключаются кнопкой 📁.
 - 👀 Следит за правками и предлагает ревью; заметила новый коммит — коротко его прокомментирует.
+- 🧪 В режиме 👀 сама гоняет тесты после твоих правок — командой, которую ты разрешил «всегда»
+  (`pytest`, `npm test`, `go test`…): покраснели — скажет и разберёт, позеленели — порадуется.
 - 🚦 После коммита ждёт GitHub Actions: CI зелёный — радуется, красный — говорит, какой шаг упал,
   и по кнопке разбирается. Без `GITHUB_TOKEN` проверяет редко (лимит GitHub — 60 запросов в час).
 
@@ -151,7 +153,8 @@ ln -s "$PWD/vscode-extension" ~/.vscode/extensions/anime-devochka.aiko-chan-0.1.
 ```bash
 .venv/bin/python -m unittest discover -s tests    # тесты бэкенда, модель не вызывается
 uv run --with playwright python -m unittest discover -s tests/e2e   # фронт в настоящем Chromium
-node --test tests/vscode                          # расширение VS Code (vscode — заглушка)
+node --test tests/vscode/*.test.js                # расширение VS Code (vscode — заглушка)
+scripts/ci-local.sh                               # весь пайплайн CI локально, как на чистом раннере
 ```
 
 E2E-тесты поднимают сервер и браузер, а ответы модели подменяют заготовленным NDJSON.

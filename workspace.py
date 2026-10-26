@@ -54,6 +54,9 @@ ACCESSORIES = ["none", "glasses", "cap", "headphones", "cat_ears", "hard_hat", "
 BACKGROUNDS = ["sakura", "terminal", "space", "cafe", "ocean", "sunset", "forest"]
 
 HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+# похоже на запуск тестов — такую разрешённую команду можно гонять в фоне
+TEST_COMMAND_RE = re.compile(r"\b(pytest|unittest|tox|nox|jest|vitest|mocha|go test|cargo test|"
+                             r"(npm|pnpm|yarn|bun)( run)? test|make (test|check)|mvn test|gradle\w* test|rspec)\b")
 
 
 def clean_outfit(args: dict) -> dict:
@@ -281,6 +284,10 @@ class Workspace:
         except (OSError, json.JSONDecodeError):
             return []
         return [c for c in items if isinstance(c, str)] if isinstance(items, list) else []
+
+    def test_command(self) -> str | None:
+        """Команда тестов для фоновых прогонов: только из разрешённых «всегда» семпаем."""
+        return next((c for c in reversed(self.allowed_commands()) if TEST_COMMAND_RE.search(c)), None)
 
     def set_allowed(self, command: str, allowed: bool) -> None:
         """Команды сравниваются целиком, до символа: «make test» не разрешает «make test; rm -rf ~»."""

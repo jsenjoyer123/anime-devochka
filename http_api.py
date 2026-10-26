@@ -25,6 +25,7 @@ MAX_BODY_BYTES = 64_000  # максимальный размер запроса 
 AGENT: Agent | None = None             # текущий проект
 AGENTS: dict[Path, Agent] = {}          # открытые проекты: история диалога сохраняется при переключении
 SWITCH_LOCK = threading.Lock()
+AUTOTEST_LOCK = threading.Lock()        # фоновые тесты — не больше одного прогона за раз
 API_KEY = ""
 MODEL = ""
 TWITCH: TwitchChat | None = None        # чат стрима, если задан TWITCH_CHANNEL
@@ -146,6 +147,7 @@ class Handler(SimpleHTTPRequestHandler):
                 "spent_today": usage.today()["cost"],
                 "twitch": TWITCH.channel if TWITCH else None,
                 "tasks": agent.ws.tasks.items(),
+                "test_command": agent.ws.test_command(),
             })
         if self.path == "/api/onboarding":
             return self._onboarding(agent)
@@ -218,7 +220,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         if self.path not in ("/api/chat", "/api/tts", "/api/confirm", "/api/stt", "/api/project", "/api/broadcast",
-                             "/api/context", "/api/allowed", "/api/annotations", "/api/tasks"):
+                             "/api/context", "/api/allowed", "/api/annotations", "/api/tasks", "/api/autotest"):
             return self._json(404, {"error": "not found"})
         if not self._same_origin():
             return self._json(403, {"error": "forbidden"})
@@ -245,6 +247,20 @@ class Handler(SimpleHTTPRequestHandler):
             ok = agent.resolve_confirm(str(body.get("id", "")), body.get("approve") is True,
                                        edited if isinstance(edited, str) else None, body.get("always") is True)
             return self._json(200 if ok else 404, {"ok": ok})
+        if self.path == "/api/autotest":
+            # фоновый прогон тестов в режиме 👀: только команда, которую семпай разрешил «всегда»
+            command = agent.ws.test_command()
+            if not command:
+                return self._json(200, {"command": None})
+            if not AUTOTEST_LOCK.acquire(blocking=False):
+                return self._json(409, {"error": "тесты уже идут"})
+            try:
+                out = devtools.run_command(agent.ws.root, command)
+            finally:
+                AUTOTEST_LOCK.release()
+            status = out.splitlines()[1] if len(out.splitlines()) > 1 else ""
+            return self._json(200, {"command": command, "ok": status == "[код выхода 0]",
+                                    "output": out[-4000:]})
         if self.path == "/api/tasks":
             # галочки и добавление задач из панели: семпай ведёт план вместе с Айко
             try:

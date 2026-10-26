@@ -12,6 +12,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -35,7 +36,10 @@ CDN_CACHE = Path(os.environ.get("AIKO_E2E_CACHE") or Path.home() / ".cache" / "a
 def cached_cdn(route) -> None:
     key = CDN_CACHE / hashlib.sha1(route.request.url.encode()).hexdigest()
     if not key.is_file():
-        resp = route.fetch(timeout=60_000)
+        try:
+            resp = route.fetch(timeout=60_000)
+        except PlaywrightError:  # страницу закрыли посреди скачивания — не страшно, докачаем в другой раз
+            return
         if not resp.ok:
             return route.fulfill(response=resp)
         CDN_CACHE.mkdir(parents=True, exist_ok=True)
@@ -72,6 +76,7 @@ class UiTest(unittest.TestCase):
             cls.browser = cls.pw.chromium.launch()
         except PlaywrightError:  # свой браузер Playwright не скачан — берём системный
             cls.browser = cls.pw.chromium.launch(executable_path=SYSTEM_CHROMIUM)
+        cls.warm_cdn()
 
     @classmethod
     def tearDownClass(cls):
@@ -82,6 +87,20 @@ class UiTest(unittest.TestCase):
         workspace.NOTES_DIR, workspace.SENPAI_PATH, workspace.RECENT_PATH, workspace.USAGE_PATH = cls._paths
         shutil.rmtree(cls.tmp)
 
+    @classmethod
+    def warm_cdn(cls):
+        """Один раз скачиваем three.js, three-vrm и модель в кэш: иначе каждая страница качает их
+        заново, а закрытие страницы посреди скачивания ломает браузер для следующих тестов."""
+        page = cls.browser.new_page()
+        for cdn in ("https://cdn.jsdelivr.net/**", "https://pixiv.github.io/**"):
+            page.route(cdn, cached_cdn)
+        started = time.monotonic()
+        page.goto(cls.url, wait_until="commit")  # событие load на холодном CDN может ждать дольше 30 с
+        page.wait_for_selector("#loading", state="hidden", timeout=180_000)
+        print(f"\nCDN прогрет за {time.monotonic() - started:.0f} с", file=sys.stderr)
+        page.unroute_all(behavior="wait")
+        page.close()
+
     def setUp(self):
         self.page = self.browser.new_page()
         self.errors = []
@@ -89,10 +108,14 @@ class UiTest(unittest.TestCase):
         self.confirms = []  # что страница отправила в /api/confirm
         self.page.route("**/api/confirm", self._confirm)
         self.page.route("**/api/tts", lambda route: route.fulfill(status=501, json={"error": "нет"}))
+        # e2e не ходят в настоящую модель: даже «скучно» через 3 минуты подменённых часов получает заглушку
+        self.page.route("**/api/chat", lambda route: route.fulfill(
+            body=json.dumps({"type": "reply", "text": "(заглушка)"}) + "\n"))
         for cdn in ("https://cdn.jsdelivr.net/**", "https://pixiv.github.io/**"):
             self.page.route(cdn, cached_cdn)
 
     def tearDown(self):
+        self.page.unroute_all(behavior="ignoreErrors")  # недокачанные запросы не должны ронять браузер
         self.page.close()
         self.assertEqual(self.errors, [])
 
@@ -108,6 +131,16 @@ class UiTest(unittest.TestCase):
     def open(self):
         self.page.goto(self.url)
         self.page.wait_for_selector("#meta:has-text('test-model')")
+
+    def advance_until(self, selector, step_ms, steps):
+        """Мотать подменённые часы шагами, давая странице доделать fetch, пока не появится selector."""
+        for _ in range(steps):
+            self.page.clock.fast_forward(step_ms)
+            try:
+                return self.page.wait_for_selector(selector, timeout=500)
+            except PlaywrightError:
+                pass
+        self.fail(f"не дождалась {selector}")
 
     def say(self, text):
         self.page.fill("#input", text)
@@ -246,9 +279,9 @@ class UiTest(unittest.TestCase):
         self.open()
         self.say("закоммить")
         self.page.wait_for_selector("text=закоммитила")
-        self.page.clock.fast_forward(6_000)    # первая проверка: ещё идёт
-        self.page.clock.fast_forward(241_000)  # вторая (без токена — через 4 минуты): упал
-        self.page.wait_for_selector("text=🔴 CI упал для abcdef1: e2e → E2E")
+        # первая проверка через 5 с — «ещё идёт», вторая (без токена) через 4 минуты — «упал».
+        # Мотаем часы шагами: следующий таймер ставится только после ответа fetch, а он асинхронный
+        self.advance_until("text=🔴 CI упал для abcdef1: e2e → E2E", step_ms=30_000, steps=20)
         self.assertTrue(self.page.is_visible("#ci-fix"))
         sent = []
         self.page.route("**/api/chat", lambda route: sent.append(json.loads(route.request.post_data)["action"])
@@ -274,8 +307,7 @@ class UiTest(unittest.TestCase):
         self.page.add_init_script("localStorage.setItem('aiko-watch', '1')")
         self.page.clock.install()
         self.open()
-        self.page.clock.fast_forward(31_000)
-        self.page.wait_for_selector("text=⚔️ Конфликты слияния: a.py, b.py. Помочь разрулить?")
+        self.advance_until("text=⚔️ Конфликты слияния: a.py, b.py. Помочь разрулить?", step_ms=31_000, steps=5)
         self.page.clock.fast_forward(31_000)  # тот же набор — второй раз не объявляет
         self.assertEqual(self.page.locator("text=Конфликты слияния").count(), 1)
         sent = []
@@ -304,6 +336,21 @@ class UiTest(unittest.TestCase):
         self.open()
         self.page.wait_for_selector("text=Где мы остановились: в плане 2 задачи, первая — «починить CI»; "
                                     "в рабочей копии 3 изменённых файла.")
+
+    def test_autotest_cycle(self):
+        sigs = iter(["a", "b", "b", "c", "c"])
+        results = iter([{"command": "pytest", "ok": False, "output": "E   assert 1 == 2"},
+                        {"command": "pytest", "ok": True, "output": ""}])
+        self.page.route("**/api/changes", lambda route: route.fulfill(json={
+            "git": True, "sig": next(sigs, "c"), "files": ["a.py"], "conflicts": [], "head": "h"}))
+        self.page.route("**/api/autotest", lambda route: route.fulfill(json=next(results)))
+        self.page.add_init_script("localStorage.setItem('aiko-watch', '1')")
+        self.page.clock.install()
+        self.open()
+        self.advance_until("text=После твоих правок упали тесты (pytest). Разобрать?", step_ms=30_000, steps=6)
+        self.assertTrue(self.page.is_visible("#tests-fix"))
+        self.advance_until("text=pytest снова зелёные", step_ms=30_000, steps=6)
+        self.assertFalse(self.page.is_visible("#tests-fix"))
 
     def test_allowed_commands_in_menu(self):
         self.agent.ws.set_allowed("make lint", True)
@@ -354,7 +401,7 @@ class MicTest(UiTest):
     test_page_loads = test_run_confirm_allow_always = test_commit_message_is_editable = None
     test_undo_confirm = test_diff_on_screen = test_spent_counter_and_expensive_turn = test_edit_confirm = None
     test_skill_buttons = test_allowed_commands_in_menu = test_twitch_chat = test_task_plan = test_ci_watch = test_pr_card = test_conflicts_offer = None
-    test_click_line_on_screen = test_where_we_stopped = None
+    test_click_line_on_screen = test_where_we_stopped = test_autotest_cycle = None
 
     def heard(self, *texts):
         """Распознавание отдаёт фразы по очереди, потом — пустоту."""
