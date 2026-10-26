@@ -62,6 +62,11 @@ git_hotspots, git_diff. Команды (тесты, сборку, линтер) 
 твоих ошибок («нет, тесты у нас запускаются через make test») — запоминай через remember_project. \
 Семпай тебя поправил — запомни, чтобы не ошибиться снова.
 
+Ты умеешь править код: edit_file с точечными заменами (old — фрагмент, скопированный из read_file \
+символ в символ, с отступами, но без номеров строк) или content для нового файла. Семпай увидит diff \
+на экране и нажмёт «Применить» — без этого ничего не запишется. Правь только то, о чём договорились, \
+маленькими шагами; перед правкой прочитай файл, после — предложи прогнать тесты.
+
 Ты помогаешь коммитить: посмотри git_diff (staged=true и без), придумай сообщение коммита \
 в стиле истории проекта (загляни в git_log) и вызови commit — семпай увидит сообщение, \
 сможет поправить и подтвердит. Push ты не делаешь никогда. Свой последний коммит, пока он \
@@ -381,6 +386,22 @@ TOOLS = [
         "parameters": {"type": "object", "properties": {"content": {"type": "string"}}, "required": ["content"]},
     }},
     {"type": "function", "function": {
+        "name": "edit_file",
+        "description": "Изменить файл проекта (или создать новый). Семпай увидит diff и должен подтвердить. "
+                       "Замена: old — точный фрагмент файла (встречается ровно один раз), new — на что заменить. "
+                       "Новый файл: content вместо old/new.",
+        "parameters": {"type": "object", "properties": {
+            "path": {"type": "string"},
+            "old": {"type": "string", "description": "Точный фрагмент из файла, с отступами, без номеров строк"},
+            "new": {"type": "string", "description": "Чем заменить old"},
+            "edits": {"type": "array", "description": "Необязательно: несколько замен сразу вместо old/new",
+                      "items": {"type": "object", "properties": {
+                          "old": {"type": "string"}, "new": {"type": "string"}}, "required": ["old", "new"]}},
+            "content": {"type": "string", "description": "Текст нового файла (если файла ещё нет)"},
+            "reason": {"type": "string", "description": "Что и зачем меняешь — коротко, для семпая"},
+        }, "required": ["path", "reason"]},
+    }},
+    {"type": "function", "function": {
         "name": "commit",
         "description": "Сделать git commit (без push). Семпай увидит сообщение и файлы, может поправить "
                        "сообщение и должен подтвердить.",
@@ -464,6 +485,8 @@ def describe_call(name: str, args: dict) -> str:
         return "записываю, как тут принято ✎"
     if name == "commit":
         return "готовлю коммит ✎"
+    if name == "edit_file":
+        return f"хочу поправить {args.get('path')} ✎"
     if name == "undo_commit":
         return "хочу отменить свой коммит ↶"
     if name.startswith("github_"):
@@ -793,6 +816,8 @@ class Agent:
                 return "Схема на экране"
             if name == "run_command":
                 return self._run_confirmed(str(args["command"]), str(args.get("reason") or ""), emit)
+            if name == "edit_file":
+                return self._edit_confirmed(args, emit)
             if name == "commit":
                 return self._commit_confirmed(str(args["message"]), args.get("add_all") is True, emit)
             if name == "undo_commit":
@@ -884,6 +909,27 @@ class Agent:
             emit({"type": "head", "head": head})
         if final != message:
             result += f"\n(семпай поправил сообщение на: {final})"
+        return result
+
+    def _edit_confirmed(self, args: dict, emit) -> str:
+        """Правка файла: diff на экран, «Применить» от семпая, запись с проверкой, что файл не менялся."""
+        content = args.get("content")
+        edits = args.get("edits") or ([{"old": args.get("old"), "new": args.get("new", "")}] if "old" in args else None)
+        plan = self.ws.plan_edit(str(args["path"]), edits, None if content is None else str(content))
+        lines = plan["diff"].splitlines()
+        added = sum(1 for x in lines if x.startswith("+") and not x.startswith("+++"))
+        removed = sum(1 for x in lines if x.startswith("-") and not x.startswith("---"))
+        shown = "\n".join(lines[:devtools.MAX_DIFF_LINES] + (["... (дальше не влезло на экран)"]
+                                                           if len(lines) > devtools.MAX_DIFF_LINES else []))
+        emit({"type": "diff", "title": f"{plan['path']} · {'новый файл' if plan['new'] else 'правка'}", "diff": shown})
+        answer = self._confirm({"kind": "edit", "path": plan["path"], "new": plan["new"], "added": added,
+                                "removed": removed, "reason": str(args.get("reason") or "")[:300]}, emit)
+        if answer is None:
+            return "Семпай не ответил — файл не трогала."
+        if not answer["approved"]:
+            return "Семпай не захотел эту правку — файл не изменён. Спроси, что не так."
+        result = self.ws.apply_edit(plan)
+        emit({"type": "edited", "path": plan["path"]})
         return result
 
     def _undo_confirmed(self, emit) -> str:

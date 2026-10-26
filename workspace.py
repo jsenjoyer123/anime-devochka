@@ -1,9 +1,11 @@
 """
-Песочница Айко: инструменты видят только файлы внутри корня проекта и ничего в нём не меняют.
+Песочница Айко: инструменты видят только файлы внутри корня проекта. Менять файлы она может
+только через plan_edit/apply_edit — и только после подтверждения семпая (это решает agent.py).
 Здесь же живёт её память — пути к заметкам и списку проектов.
 """
 
 import datetime
+import difflib
 import fnmatch
 import json
 import os
@@ -29,6 +31,8 @@ MAX_READ_CHARS = 20_000     # символов файла за одно чтен
 MAX_FILE_BYTES = 2_000_000  # файлы крупнее не ищем по ним
 MAX_LIST_ENTRIES = 300
 MAX_SHOW_LINES = 60  # строк кода на экран стрима за один раз
+MAX_EDIT_BYTES = 500_000  # крупнее файлы не правим
+MAX_EDITS = 20            # замен за один вызов
 MAX_SKILLS = 12
 MAX_SKILL_CHARS = 6_000
 SKILL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,40}$")
@@ -73,7 +77,7 @@ def clean_outfit(args: dict) -> dict:
 
 
 class Workspace:
-    """Песочница: инструменты видят только файлы внутри корня проекта и ничего в нём не меняют."""
+    """Песочница: инструменты видят только файлы внутри корня проекта; правки — только с подтверждением."""
 
     def __init__(self, root: Path, notes_path: Path):
         self.root = root.resolve()
@@ -300,6 +304,63 @@ class Workspace:
         self.onboarding_path.parent.mkdir(parents=True, exist_ok=True)
         self.onboarding_path.write_text(content, encoding="utf-8")
         return "ONBOARDING.md сохранён, семпай может скачать его кнопкой в чате"
+
+    def plan_edit(self, path: str, edits: list | None = None, content: str | None = None) -> dict:
+        """Готовим правку, ничего не записывая: проверки + diff для семпая.
+        edits — замены [{old, new}], каждая old должна встречаться в файле ровно один раз;
+        content — текст нового файла (только если файла ещё нет)."""
+        p = self._resolve(path)
+        rel = self._rel(p)
+        if p == self.root or self._is_secret(p.name) or any(part in IGNORED_DIRS for part in Path(rel).parts[:-1]):
+            raise ValueError(f"Этот файл я не трогаю: {path}")
+        if content is not None:
+            if p.exists():
+                raise ValueError(f"{rel} уже есть — правь его заменами (edits), а не content")
+            before, after = "", str(content)
+        else:
+            if not p.is_file():
+                raise ValueError(f"Файл не найден: {rel}. Новый файл — через content")
+            if p.stat().st_size > MAX_EDIT_BYTES or self._is_binary(p):
+                raise ValueError(f"{rel} слишком большой или бинарный — не правлю")
+            raw = self._read_raw(p)
+            before = raw.replace("\r\n", "\n")
+            if not isinstance(edits, list) or not 1 <= len(edits) <= MAX_EDITS:
+                raise ValueError("Нужны old (точный фрагмент файла) и new (на что заменить) "
+                                 f"или edits — список таких замен (до {MAX_EDITS})")
+            after = before
+            for i, e in enumerate(edits, 1):
+                old, new = str((e or {}).get("old", "")), str((e or {}).get("new", ""))
+                n = after.count(old) if old else 0
+                if n != 1:
+                    raise ValueError(f"Замена {i}: фрагмент old найден {n} раз, нужен ровно 1 — "
+                                     "скопируй его из read_file точно, с отступами, и добавь строк для уникальности")
+                after = after.replace(old, new, 1)
+            if after == before:
+                raise ValueError("Правка ничего не меняет")
+        if len(after.encode()) > MAX_EDIT_BYTES:
+            raise ValueError("Слишком большой результат")
+        diff = "".join(difflib.unified_diff(before.splitlines(keepends=True), after.splitlines(keepends=True),
+                                            "/dev/null" if content is not None else f"a/{rel}", f"b/{rel}"))
+        crlf = content is None and "\r\n" in raw
+        return {"path": rel, "before": before, "after": after, "diff": diff, "new": content is not None, "crlf": crlf}
+
+    @staticmethod
+    def _read_raw(p: Path) -> str:
+        with p.open(encoding="utf-8", newline="") as f:  # без перевода \r\n → \n
+            return f.read()
+
+    def apply_edit(self, plan: dict) -> str:
+        """Записываем подтверждённую правку, если файл не изменился с момента plan_edit."""
+        p = self._resolve(plan["path"])
+        now = self._read_raw(p).replace("\r\n", "\n") if p.is_file() else ""
+        if now != plan["before"] or (plan["new"] and p.exists()):
+            raise ValueError(f"{plan['path']} изменился, пока семпай смотрел, — перечитай и предложи заново")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("w", encoding="utf-8", newline="") as f:  # переводы строк — как были в файле
+            f.write(plan["after"].replace("\n", "\r\n") if plan["crlf"] else plan["after"])
+        added = sum(1 for line in plan["diff"].splitlines() if line.startswith("+") and not line.startswith("+++"))
+        removed = sum(1 for line in plan["diff"].splitlines() if line.startswith("-") and not line.startswith("---"))
+        return f"{'Создала' if plan['new'] else 'Поправила'} {plan['path']}: +{added} −{removed}"
 
     def code_snippet(self, path: str, start_line: int, end_line: int) -> dict:
         """Фрагмент для экрана стрима: без номеров строк, не больше MAX_SHOW_LINES."""

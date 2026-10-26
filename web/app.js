@@ -617,6 +617,8 @@ function askConfirm(ev) {
     ? `Закоммитить ${ev.add_all ? "все изменения" : "то, что в индексе"}: ${ev.files.slice(0, 5).map((f) => `\`${f}\``).join(", ")}${more}? Сообщение можно поправить:`
     : ev.kind === "undo"
       ? `Отменить мой коммит \`${ev.commit}\` «${ev.subject}»? Изменения вернутся в индекс, ничего не потеряется.`
+      : ev.kind === "edit"
+      ? `${ev.new ? "Создам" : "Поправлю"} \`${ev.path}\` (+${ev.added} −${ev.removed}), diff на экране.${ev.reason ? `\n${ev.reason}` : ""}`
       : `Можно запущу \`${ev.command}\`?${ev.reason ? `\n${ev.reason}` : ""}`);
   // сообщение коммита семпай правит прямо здесь — уйдёт то, что в поле
   const text = commit ? Object.assign(document.createElement("textarea"), { className: "commit-msg", value: ev.message, rows: 3 }) : null;
@@ -632,7 +634,7 @@ function askConfirm(ev) {
       body: JSON.stringify({ id: ev.id, approve, always, ...(message ? { message } : {}) }),
     }).catch(() => {});
   };
-  const yes = Object.assign(document.createElement("button"), { className: "yes", textContent: commit ? "Закоммитить" : "Разрешить" });
+  const yes = Object.assign(document.createElement("button"), { className: "yes", textContent: commit ? "Закоммитить" : ev.kind === "edit" ? "Применить" : "Разрешить" });
   const no = Object.assign(document.createElement("button"), { className: "no", textContent: commit ? "Не надо" : "Запретить" });
   yes.onclick = () => answer(true);
   no.onclick = () => answer(false);
@@ -651,6 +653,8 @@ function askConfirm(ev) {
     ? "[shy] Семпай, я придумала сообщение коммита. Глянешь и нажмёшь «Закоммитить»?"
     : ev.kind === "undo"
       ? "[shy] Семпай, отменить мой коммит? Нажми «Разрешить» в чате."
+      : ev.kind === "edit"
+      ? "[think] Я придумала правку, она на экране. Глянешь и нажмёшь «Применить»?"
       : "[shy] Семпай, можно я кое-что запущу? Нажми «Разрешить» в чате.");
 }
 
@@ -780,6 +784,8 @@ function handleEvent(ev) {
   } else if (ev.type === "usage") {
     turnCost += ev.cost;
     showSpent(ev.today);
+  } else if (ev.type === "edited") {
+    lastSig = pendingSig = null; // свои правки она уже видела — не предлагать на них ревью
   } else if (ev.type === "head") {
     lastHead = ev.head; // HEAD сдвинула она сама (коммит или отмена) — реагировать не нужно
   } else if (ev.type === "reminder") {

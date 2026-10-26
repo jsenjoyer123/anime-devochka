@@ -130,6 +130,20 @@ class UiTest(unittest.TestCase):
         self.page.wait_for_selector("text=✅ разрешено")
         self.assertEqual(self.confirms, [{"id": "u1", "approve": True, "always": False}])
 
+    def test_edit_confirm(self):
+        self.chat_replies({"type": "diff", "title": "app.py · правка", "diff": "@@ -1 +1 @@\n-a\n+b"},
+                          {"type": "confirm", "id": "e1", "kind": "edit", "path": "app.py", "new": False,
+                           "added": 1, "removed": 1, "reason": "чиню опечатку"},
+                          {"type": "reply", "text": "жду"})
+        self.open()
+        self.say("почини")
+        self.page.wait_for_selector("text=Поправлю app.py (+1 −1), diff на экране.")
+        self.assertTrue(self.page.is_visible("#screen pre.diff"))
+        self.assertFalse(self.page.is_visible("text=Разрешать всегда"))
+        self.page.click("text=Применить")
+        self.page.wait_for_selector("text=✅ разрешено")
+        self.assertEqual(self.confirms, [{"id": "e1", "approve": True, "always": False}])
+
     def test_diff_on_screen(self):
         self.chat_replies({"type": "diff", "title": "app.py · правки",
                            "diff": "diff --git a/app.py b/app.py\n@@ -1 +1 @@\n-print('hi')\n+print('привет')"},
@@ -234,7 +248,7 @@ class MicTest(UiTest):
 
     # тесты родителя здесь не повторяем
     test_page_loads = test_run_confirm_allow_always = test_commit_message_is_editable = None
-    test_undo_confirm = test_diff_on_screen = test_spent_counter_and_expensive_turn = None
+    test_undo_confirm = test_diff_on_screen = test_spent_counter_and_expensive_turn = test_edit_confirm = None
     test_skill_buttons = test_allowed_commands_in_menu = test_twitch_chat = None
 
     def heard(self, *texts):

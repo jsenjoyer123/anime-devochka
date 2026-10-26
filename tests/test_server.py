@@ -505,6 +505,96 @@ class UndoCommitTest(GitUserBase):
         self.assertFalse([e for e in events if e["type"] == "confirm"])
 
 
+class EditTest(Base):
+    def test_plan_and_apply(self):
+        plan = self.ws.plan_edit("src/app.py", [{"old": "return 42", "new": "return 43"}])
+        self.assertIn("-    return 42", plan["diff"])
+        self.assertIn("+    return 43", plan["diff"])
+        self.assertIn("return 42", (self.root / "src" / "app.py").read_text())  # план ничего не пишет
+        self.assertEqual(self.ws.apply_edit(plan), "Поправила src/app.py: +1 −1")
+        self.assertIn("return 43", (self.root / "src" / "app.py").read_text())
+
+    def test_new_file(self):
+        plan = self.ws.plan_edit("src/util.py", content="def helper():\n    pass\n")
+        self.assertTrue(plan["diff"].startswith("--- /dev/null"))
+        self.assertEqual(self.ws.apply_edit(plan), "Создала src/util.py: +2 −0")
+        with self.assertRaisesRegex(ValueError, "уже есть"):
+            self.ws.plan_edit("src/util.py", content="x")
+        self.ws.apply_edit(self.ws.plan_edit("docs/deep/new.md", content="# hi\n"))  # папки создаются
+        self.assertTrue((self.root / "docs" / "deep" / "new.md").is_file())
+
+    def test_rejections(self):
+        (self.root / "src" / "dup.py").write_text("x = 1\nx = 1\n", encoding="utf-8")
+        cases = [
+            ("src/dup.py", [{"old": "x = 1", "new": "x = 2"}], None, "найден 2 раз"),
+            ("src/app.py", [{"old": "нет такого", "new": "y"}], None, "найден 0 раз"),
+            ("src/app.py", [{"old": "", "new": "y"}], None, "найден 0 раз"),
+            ("src/app.py", [{"old": "42", "new": "42"}], None, "ничего не меняет"),
+            ("src/app.py", [], None, "Нужны old"),
+            ("missing.py", [{"old": "a", "new": "b"}], None, "не найден"),
+            (".env", [{"old": "SECRET=1", "new": "x"}], None, "не трогаю"),
+            ("node_modules/junk.js", [{"old": "x", "new": "y"}], None, "не трогаю"),
+            (".", None, "x", "не трогаю"),
+        ]
+        for path, edits, content, error in cases:
+            with self.assertRaisesRegex(ValueError, error, msg=path):
+                self.ws.plan_edit(path, edits, content)
+        with self.assertRaisesRegex(ValueError, "вне проекта"):
+            self.ws.plan_edit("../evil.py", content="x")
+
+    def test_file_changed_while_waiting(self):
+        plan = self.ws.plan_edit("src/app.py", [{"old": "42", "new": "43"}])
+        (self.root / "src" / "app.py").write_text("def main():\n    return 1\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "изменился"):
+            self.ws.apply_edit(plan)
+        self.assertIn("return 1", (self.root / "src" / "app.py").read_text())
+
+    def test_crlf_preserved(self):
+        f = self.root / "win.txt"
+        f.write_bytes(b"line one\r\nline two\r\n")
+        self.ws.apply_edit(self.ws.plan_edit("win.txt", [{"old": "line one\nline two", "new": "line 1\nline 2"}]))
+        self.assertEqual(f.read_bytes(), b"line 1\r\nline 2\r\n")
+
+    def run_edit(self, approve, **args):
+        agent = agent_mod.Agent(self.ws, "key", "model")
+        agent._llm = scripted(
+            {"role": "assistant", "content": None, "tool_calls": [tool_call("1", "edit_file", reason="t", **args)]},
+            {"role": "assistant", "content": "ок"},
+        )
+        events = []
+
+        def emit(ev):
+            events.append(ev)
+            if ev["type"] == "confirm":
+                threading.Timer(0.05, agent.resolve_confirm, (ev["id"], approve)).start()
+
+        agent.run("поправь", emit)
+        return [m["content"] for m in agent.history if m["role"] == "tool"][0], events
+
+    def test_agent_edit_flow(self):
+        result, events = self.run_edit(True, path="src/app.py", old="42", new="43")
+        self.assertEqual([e["type"] for e in events if e["type"] in ("diff", "confirm", "edited")],
+                         ["diff", "confirm", "edited"])
+        confirm = next(e for e in events if e["type"] == "confirm")
+        self.assertEqual((confirm["kind"], confirm["added"], confirm["removed"]), ("edit", 1, 1))
+        self.assertIn("Поправила", result)
+        self.assertIn("return 43", (self.root / "src" / "app.py").read_text())
+
+        result, events = self.run_edit(False, path="src/app.py", edits=[{"old": "43", "new": "44"}])
+        self.assertIn("не захотел", result)
+        self.assertIn("return 43", (self.root / "src" / "app.py").read_text())
+        self.assertFalse([e for e in events if e["type"] == "edited"])
+
+        result, events = self.run_edit(True, path="src/app.py", old="999", new="1")
+        self.assertIn("найден 0 раз", result)
+        self.assertFalse([e for e in events if e["type"] == "confirm"])  # битую правку даже не предлагаем
+
+        result, events = self.run_edit(True, path="src/app.py", edits=[{"old": "def main", "new": "def run"},
+                                                                       {"old": "43", "new": "44"}])
+        self.assertIn("+2 −2", result)
+        self.assertEqual((self.root / "src" / "app.py").read_text(), "def run():\n    return 44\n")
+
+
 class DiffTest(Base):
     def test_screen_diff(self):
         with self.assertRaisesRegex(ValueError, "нечего"):
