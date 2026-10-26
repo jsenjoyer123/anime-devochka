@@ -153,6 +153,7 @@ button {
 button:hover { background: #ffbcd9; }
 button:disabled { opacity: .5; cursor: default; }
 button.on { background: #e2336b; color: #fff; }
+button.on.wake { background: linear-gradient(135deg, #ff8fc7, #9f7bff); }
 
 #learn {
   margin: 0 12px 8px;

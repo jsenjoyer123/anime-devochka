@@ -802,6 +802,7 @@ function handleEvent(ev) {
   } else if (ev.type === "reply") {
     setBusy(false);
     $("next").hidden = !touring;
+    followUpUntil = performance.now() + FOLLOW_UP_MS; // можно ответить ей без «Айко»
     if (!finishLive("aiko")) {
       addMessage("aiko", stripTags(ev.text));
       speak(ev.text);
@@ -889,15 +890,23 @@ const ear = new Ear({
     if (state.talking && !state.thinking) stopSpeaking(); // перебили — замолкаем
     state.tilt = 0.12; // прислушивается
   },
-  onUtterance: async (wav) => {
+  onUtterance: async (wav, { level, held }) => {
     state.tilt = 0;
     if (sendBtn.disabled) return; // она занята ответом — фразу пропускаем
     try {
       const res = await fetch("/api/stt", { method: "POST", headers: { "Content-Type": "audio/wav" }, body: wav });
-      const { text, error } = await res.json();
+      const { text: heard, error } = await res.json();
       if (error) throw new Error(error);
-      if (!text || sendBtn.disabled) return;
-      addMessage("user", `🎤 ${text}`);
+      if (!heard || sendBtn.disabled) return;
+      const text = held ? heard : addressed(heard);
+      if (text === null) return; // режим волшебного слова: это было не ей
+      feelVoice(level);
+      addMessage("user", `🎤 ${heard}`);
+      if (!text) { // просто позвали по имени
+        followUpUntil = performance.now() + FOLLOW_UP_MS;
+        quip(pick(["[happy] Да, семпай?", "[surprised] М? Я тут!", "[nod] Слушаю!"]));
+        return;
+      }
       reactToWords(text);
       ask({ message: text });
     } catch (e) {
@@ -906,21 +915,69 @@ const ear = new Ear({
   },
 });
 
+// --- волшебное слово: микрофон слышит всё, но отвечает она только на «Айко, …» ---
+const MIC_MODES = ["off", "all", "wake"];
+const FOLLOW_UP_MS = 20_000; // после её ответа можно продолжить разговор без имени
+const WAKE_RE = /(?<!\p{L})(?:айко|айка|аико|aiko)(?:-?(?:тян|chan))?(?!\p{L})[\s,.!:—-]*/iu;
+let micMode = "off";
+let followUpUntil = 0;
+
+/** Текст для Айко без её имени; "" — только позвали; null — фраза была не ей. */
+function addressed(heard) {
+  if (micMode !== "wake") return heard;
+  if (WAKE_RE.test(heard)) return heard.replace(WAKE_RE, "").trim();
+  return performance.now() < followUpUntil ? heard : null;
+}
+
+// --- настроение от голоса: крик роняет его, спокойный тон чуть поднимает ---
+const VOICE_KEY = "aiko-voice";
+function feelVoice(level) {
+  if (!(level > 0)) return;
+  let profile;
+  try { profile = JSON.parse(localStorage.getItem(VOICE_KEY)) || { avg: 0, n: 0 }; } catch { profile = { avg: 0, n: 0 }; }
+  const ratio = profile.avg ? level / profile.avg : 1;
+  if (profile.n >= 3 && ratio > 2.2) {
+    shiftMood(-0.08);
+    state.emotion = "surprised";
+    motion.play("shake");
+    quip(pick(["[surprised] Ай! Не кричи так, семпай, я же рядом.", "[sad] Ты чего такой громкий... я что-то сломала?"]));
+    return; // крик в «обычную громкость» не записываем
+  }
+  if (profile.n >= 3 && ratio < 1.3) shiftMood(0.01);
+  // обычная громкость семпая — скользящее среднее (первые фразы — простое среднее)
+  const k = 1 / Math.min(profile.n + 1, 20);
+  localStorage.setItem(VOICE_KEY, JSON.stringify({ avg: profile.avg * (1 - k) + level * k, n: profile.n + 1 }));
+}
+
 if (navigator.mediaDevices?.getUserMedia && window.AudioWorkletNode) {
   micBtn.hidden = false;
-  micBtn.title = "Клик — слушать всё время; пробел — держать и говорить";
+  const showMicMode = () => {
+    micBtn.classList.toggle("on", micMode !== "off");
+    micBtn.classList.toggle("wake", micMode === "wake");
+    micBtn.textContent = micMode === "wake" ? "✨" : "🎤";
+    micBtn.title = {
+      off: "Клик — слушать всё время; пробел — держать и говорить",
+      all: "Слушаю всё. Клик — отвечать только на «Айко, …»",
+      wake: "Отвечаю только на «Айко, …». Клик — выключить микрофон",
+    }[micMode];
+  };
+  showMicMode();
+  // клик по кругу: выключен → слушает всё → только «Айко, …» → выключен
   micBtn.onclick = async () => {
-    if (ear.active && !pttOwned) {
+    const next = MIC_MODES[(MIC_MODES.indexOf(micMode) + 1) % MIC_MODES.length];
+    if (next === "off") {
       ear.stop();
-      micBtn.classList.remove("on");
+      micMode = "off";
+      showMicMode();
       return;
     }
     try {
       if (!ear.active) await ear.start();
       ear.vad = true;
       pttOwned = false;
-      micBtn.classList.add("on");
-      quip("[happy] Слушаю, семпай! Просто говори.");
+      micMode = next;
+      showMicMode();
+      quip(next === "wake" ? "[nod] Хорошо, отвечаю, только когда позовёшь: «Айко, …»" : "[happy] Слушаю, семпай! Просто говори.");
     } catch (e) {
       addMessage("error", `Микрофон недоступен: ${e.message}`);
     }

@@ -10,7 +10,9 @@ const PREROLL_S = 0.3;        // начало фразы, сказанное д�
 
 export class Ear {
   /**
-   * onStart — семпай начал говорить; onUtterance(wavBlob) — фраза целиком;
+   * onStart — семпай начал говорить; onUtterance(wavBlob, { level, held }) — фраза целиком,
+   * средняя громкость речи в ней (для настроения: крик или спокойный тон) и была ли она
+   * сказана с зажатой кнопкой (тогда она точно адресована Айко);
    * sensitivity() — множитель порога (выше, пока Айко сама говорит, чтобы не слышать своё эхо).
    */
   constructor({ onStart, onUtterance, sensitivity = () => 1 }) {
@@ -24,6 +26,7 @@ export class Ear {
   hold() {
     if (!this.active || this.forced) return;
     this.forced = true;
+    this.held = true;
     if (!this.recording) this.#begin(performance.now());
   }
 
@@ -62,10 +65,12 @@ export class Ear {
   #reset() {
     this.recording = false;
     this.forced = false;
+    this.held = false;
     this.chunks = [];
     this.preroll = [];
     this.loud = 0;
     this.voiced = 0;
+    this.voicedEnergy = 0; // сумма rms² по кадрам с голосом — для средней громкости фразы
     this.samples = 0;
   }
 
@@ -91,6 +96,7 @@ export class Ear {
     if (rms > threshold * 0.6) {
       this.lastVoice = now;
       this.voiced += frame.length;
+      this.voicedEnergy += rms * rms * frame.length;
     }
     const silent = !this.forced && now - this.lastVoice > STOP_AFTER_MS;
     if (silent || this.samples > this.rate * MAX_UTTERANCE_S) this.#finish();
@@ -106,9 +112,10 @@ export class Ear {
   }
 
   #finish() {
-    const { chunks, voiced } = this;
+    const { chunks, voiced, voicedEnergy, held } = this;
     this.#reset();
-    if (voiced >= this.rate * MIN_SPEECH_S) this.onUtterance?.(encodeWav(downsample(chunks, this.rate)));
+    if (voiced < this.rate * MIN_SPEECH_S) return;
+    this.onUtterance?.(encodeWav(downsample(chunks, this.rate)), { level: Math.sqrt(voicedEnergy / voiced), held });
   }
 }
 

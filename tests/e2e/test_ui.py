@@ -173,5 +173,90 @@ class UiTest(unittest.TestCase):
         self.assertEqual(self.agent.ws.allowed_commands(), [])
 
 
+def fake_speech_wav(path: Path) -> None:
+    """Петля для поддельного микрофона: 1.5 с тишины, 1.2 с «речи» (гармоники с модуляцией), 2.5 с тишины."""
+    import math
+    import struct
+    import wave
+    rate = 16000
+    samples = [0.0] * int(rate * 1.5)
+    for i in range(int(rate * 1.2)):
+        t = i / rate
+        voice = sum(math.sin(2 * math.pi * f * t) / k for k, f in enumerate((180, 360, 540, 900), 1))
+        samples.append(0.25 * voice * (0.6 + 0.4 * math.sin(2 * math.pi * 4 * t)))
+    samples += [0.0] * int(rate * 2.5)
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(b"".join(struct.pack("<h", int(max(-1, min(1, x)) * 32767)) for x in samples))
+
+
+@unittest.skipIf(sync_playwright is None, "нет playwright: uv run --with playwright …")
+class MicTest(UiTest):
+    """Поддельный микрофон Chromium крутит WAV по кругу, распознавание речи подменено."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.browser.close()
+        wav = cls.tmp / "speech.wav"
+        fake_speech_wav(wav)
+        args = ["--use-fake-ui-for-media-stream", "--use-fake-device-for-media-stream",
+                f"--use-file-for-fake-audio-capture={wav}", "--autoplay-policy=no-user-gesture-required"]
+        try:
+            cls.browser = cls.pw.chromium.launch(args=args)
+        except PlaywrightError:
+            cls.browser = cls.pw.chromium.launch(executable_path=SYSTEM_CHROMIUM, args=args)
+
+    # тесты родителя здесь не повторяем
+    test_page_loads = test_run_confirm_allow_always = test_commit_message_is_editable = None
+    test_undo_confirm = test_diff_on_screen = test_spent_counter_and_expensive_turn = None
+    test_skill_buttons = test_allowed_commands_in_menu = None
+
+    def heard(self, *texts):
+        """Распознавание отдаёт фразы по очереди, потом — пустоту."""
+        queue = list(texts)
+        self.page.route("**/api/stt", lambda route: route.fulfill(json={"text": queue.pop(0) if queue else ""}))
+        self.sent = []
+
+        def chat(route):
+            self.sent.append(json.loads(route.request.post_data)["message"])
+            route.fulfill(body=json.dumps({"type": "reply", "text": "ага"}) + "\n")
+        self.page.route("**/api/chat", chat)
+
+    def wait_for(self, predicate, timeout=20):
+        import time
+        end = time.time() + timeout
+        while time.time() < end:
+            if predicate():
+                return
+            self.page.wait_for_timeout(250)
+        self.fail("не дождалась")
+
+    def test_listens_to_everything(self):
+        self.heard("привет")
+        self.open()
+        self.page.click("#mic")
+        self.page.wait_for_selector("#mic.on:not(.wake)")  # микрофон включается асинхронно
+        self.wait_for(lambda: self.sent)
+        self.assertEqual(self.sent, ["привет"])
+        self.assertEqual(json.loads(self.page.evaluate("localStorage.getItem('aiko-voice')"))["n"], 1)
+
+    def test_wake_word(self):
+        self.heard("просто болтаю с котом", "Айко, который час?")
+        self.open()
+        self.page.click("#mic")
+        self.page.wait_for_selector("#mic.on")
+        self.page.click("#mic")
+        self.page.wait_for_selector("#mic.on.wake")
+        self.assertEqual(self.page.text_content("#mic"), "✨")
+        self.wait_for(lambda: self.sent)
+        self.assertEqual(self.sent, ["который час?"])  # фраза коту в чат не ушла, имя срезано
+        self.assertFalse(self.page.is_visible("text=просто болтаю с котом"))
+        self.page.click("#mic")
+        self.page.wait_for_selector("#mic:not(.on)")
+
+
 if __name__ == "__main__":
     unittest.main()
