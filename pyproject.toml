@@ -1,0 +1,28 @@
+[project]
+name = "aiko-chan"
+version = "0.2.0"
+description = "3D аниме AI-витубер, которая онбордится в твой проект"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = []  # бэкенд — только стандартная библиотека
+
+[project.optional-dependencies]
+# голос edge-tts; без него Айко говорит браузерным SpeechSynthesis
+voice = ["edge-tts>=7.0,<8"]
+
+[project.scripts]
+aiko = "server:main"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+# модули лежат в корне, а web/, skills/ и notes/ ищутся рядом с ними — ставить только editable:
+#   uv tool install -e '.[voice]'   или   pip install -e '.[voice]'
+[tool.setuptools]
+py-modules = ["agent", "devtools", "http_api", "llm", "quest", "server", "usage", "workspace"]
+
+[tool.ruff]
+# Минимум: реальные ошибки и мёртвый код; стиль не полиционируем.
+lint.select = ["E9", "F"]

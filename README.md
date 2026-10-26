@@ -12,6 +12,13 @@ uv venv .venv && uv pip install --python .venv/bin/python -r requirements.txt   
 .venv/bin/python server.py ~/path/to/project                         # открой http://127.0.0.1:8765
 ```
 
+Или командой `aiko` из любой папки (установка editable — Айко живёт там, где лежит репозиторий):
+
+```bash
+uv tool install -e '.[voice]'    # или: pip install -e '.[voice]'
+aiko ~/path/to/project
+```
+
 Нажми «✨ Изучить проект» — она пройдёт по коду, сохранит заметки в `notes/<проект>.md`
 и переоденется под проект. При следующем запуске она всё вспомнит.
 

@@ -3,3 +3,5 @@ notes/
 __pycache__/
 .venv/
 web/models/*.vrm
+*.egg-info/
+build/
