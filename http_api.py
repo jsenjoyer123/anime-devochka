@@ -13,7 +13,8 @@ from pathlib import Path
 import devtools
 import usage
 import workspace
-from agent import Agent, TASKS
+from agent import Agent, TASKS, twitch_task
+from twitch import TwitchChat
 from llm import MAX_AUDIO_BYTES, MAX_TTS_CHARS, edge_tts, synthesize, transcribe
 from workspace import MAX_RECENT, Workspace
 
@@ -25,6 +26,7 @@ AGENTS: dict[Path, Agent] = {}          # открытые проекты: ис�
 SWITCH_LOCK = threading.Lock()
 API_KEY = ""
 MODEL = ""
+TWITCH: TwitchChat | None = None        # чат стрима, если задан TWITCH_CHANNEL
 
 
 class Hub:
@@ -113,6 +115,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self._events()
         if self.path == "/api/changes":
             return self._json(200, devtools.changes(agent.ws.root))
+        if self.path.startswith("/api/twitch"):
+            return self._twitch()
         if self.path == "/api/annotations":
             # расширение VS Code: замечания ревью для подчёркиваний; root — чтобы собрать полные пути
             return self._json(200, {"root": str(agent.ws.root), **agent.annotations})
@@ -133,10 +137,23 @@ class Handler(SimpleHTTPRequestHandler):
                 "transcript": agent.transcript,
                 "allowed": agent.ws.allowed_commands(),
                 "spent_today": usage.today()["cost"],
+                "twitch": TWITCH.channel if TWITCH else None,
             })
         if self.path == "/api/onboarding":
             return self._onboarding(agent)
         return super().do_GET()
+
+    def _twitch(self) -> None:
+        """Новые сообщения чата Twitch после номера since."""
+        if TWITCH is None:
+            return self._json(404, {"error": "TWITCH_CHANNEL не задан"})
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        try:
+            since = int(query.get("since", ["0"])[0])
+        except ValueError:
+            since = 0
+        return self._json(200, {"channel": TWITCH.channel, "connected": TWITCH.connected,
+                                "messages": TWITCH.since(since)})
 
     def _events(self) -> None:
         """SSE-поток для зрителей. Пинг раз в 15 секунд — так замечаем закрытые окна."""
@@ -245,6 +262,11 @@ class Handler(SimpleHTTPRequestHandler):
         skill = agent.ws.skills().get(action[6:]) if isinstance(action, str) and action.startswith("skill:") else None
         if skill:  # своя кнопка-задание: текст читаем заново — файл можно править без перезапуска
             text, label = skill["prompt"], f"[{skill['title']}]"
+        elif action == "twitch":
+            fresh = TWITCH.take_unanswered() if TWITCH else []
+            if not fresh:
+                return self._json(400, {"error": "В чате Twitch нет новых сообщений"})
+            text, label = twitch_task(fresh), "[чат Twitch]"
         else:
             text = TASKS.get(action) or str(body.get("message", "")).strip()
             label = f"[{action}]" if action in TASKS else None

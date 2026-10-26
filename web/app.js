@@ -1189,6 +1189,7 @@ setInterval(() => {
     fallAsleep();
   } else if (idleFor > BORED_AFTER_MS && !boredSpoken && !sendBtn.disabled) {
     boredSpoken = true;
+    if (twitchUnanswered) return answerTwitch(); // в тишине на стриме — самое время ответить зрителям
     shiftMood(-0.05);
     ask({ action: "idle" });
   } else if (Math.random() < 0.35) {
@@ -1450,6 +1451,38 @@ async function switchProject(path) {
   location.reload(); // новая модель, образ и заметки — проще и чище начать страницу заново
 }
 
+// ---------- чат Twitch: сообщения зрителей в панели, Айко отвечает на лучшие ----------
+let twitchSeq = 0;
+let twitchUnanswered = 0;
+function answerTwitch() {
+  $("twitch-answer").hidden = true;
+  twitchUnanswered = 0;
+  ask({ action: "twitch" });
+}
+$("twitch-answer").onclick = answerTwitch;
+
+async function pollTwitch() {
+  let data;
+  try { data = await (await fetch(`/api/twitch?since=${twitchSeq}`)).json(); } catch { return; }
+  for (const m of data.messages || []) {
+    twitchSeq = Math.max(twitchSeq, m.id);
+    addMessage("viewer", `💬 ${m.user}: ${m.text}`);
+    twitchUnanswered++;
+  }
+  $("twitch-answer").hidden = !twitchUnanswered;
+  $("twitch-answer").textContent = `💬 Ответить чату (${twitchUnanswered})`;
+}
+
+async function startTwitch() {
+  const s = await (await fetch("/api/status")).json().catch(() => ({}));
+  if (!s.twitch || OBS) return;
+  // старые сообщения (до открытия страницы) не показываем — только номер, с которого начать
+  const first = await (await fetch("/api/twitch?since=0")).json().catch(() => ({ messages: [] }));
+  twitchSeq = first.messages.at(-1)?.id || 0;
+  addMessage("tool", `📺 читаю чат twitch.tv/${s.twitch}`);
+  setInterval(pollTwitch, 4000);
+}
+
 // окно OBS: принимаем события основной вкладки
 if (OBS) {
   const events = new EventSource("/api/events");
@@ -1501,5 +1534,6 @@ if (EMBED === "vscode") {
 }
 
 decorateSeason();
+startTwitch();
 // сначала узнаём, нет ли своей модели для проекта, потом грузим
 refreshStatus().finally(loadDefaultModel);

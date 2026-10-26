@@ -16,6 +16,7 @@ from pathlib import Path
 
 import http_api
 from llm import DEFAULT_MODEL
+from twitch import TwitchChat
 
 HERE = Path(__file__).resolve().parent
 
@@ -51,12 +52,20 @@ def main() -> int:
     http_api.API_KEY = api_key
     http_api.MODEL = model = args.model or os.environ.get("OPENROUTER_MODEL") or DEFAULT_MODEL
     http_api.open_project(root)
+    if channel := os.environ.get("TWITCH_CHANNEL", "").strip():
+        try:
+            http_api.TWITCH = TwitchChat(channel).start()
+        except ValueError as e:
+            print(e)
+            return 1
 
     # слушаем только localhost: наружу проект не светим
     server = ThreadingHTTPServer(("127.0.0.1", args.port), http_api.Handler)
     server.daemon_threads = True
     print(f"✿ Айко-тян ждёт тебя: http://127.0.0.1:{args.port}")
     print(f"  проект: {root}\n  модель: {model}")
+    if http_api.TWITCH:
+        print(f"  чат Twitch: #{http_api.TWITCH.channel} (только чтение)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

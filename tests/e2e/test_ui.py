@@ -23,6 +23,7 @@ except ImportError:
     sync_playwright = None
 
 import http_api  # noqa: E402
+import twitch  # noqa: E402
 import usage  # noqa: E402
 import workspace  # noqa: E402
 
@@ -164,6 +165,28 @@ class UiTest(unittest.TestCase):
         self.page.wait_for_selector("text=готово")
         self.assertEqual(sent[0]["action"], "skill:tests")
 
+    def test_twitch_chat(self):
+        http_api.TWITCH = chat = twitch.TwitchChat("aiko")
+        self.addCleanup(setattr, http_api, "TWITCH", None)
+        chat._add({"user": "old", "text": "было до открытия страницы"})
+        sent = []
+
+        def reply(route):
+            sent.append(json.loads(route.request.post_data)["action"])
+            route.fulfill(body=json.dumps({"type": "reply", "text": "@vasya, привет!"}) + "\n")
+        self.page.route("**/api/chat", reply)
+        self.open()
+        self.page.wait_for_selector("text=читаю чат twitch.tv/aiko")
+        chat._add({"user": "vasya", "text": "Айко, привет!"})
+        chat._add({"user": "petya", "text": "что за проект?"})
+        self.page.wait_for_selector("#twitch-answer:has-text('(2)')", timeout=10_000)
+        self.assertTrue(self.page.is_visible("text=💬 vasya: Айко, привет!"))
+        self.assertFalse(self.page.is_visible("text=было до открытия страницы"))
+        self.page.click("#twitch-answer")
+        self.page.wait_for_selector("text=@vasya, привет!")
+        self.assertEqual(sent, ["twitch"])
+        self.assertFalse(self.page.is_visible("#twitch-answer"))
+
     def test_allowed_commands_in_menu(self):
         self.agent.ws.set_allowed("make lint", True)
         self.open()
@@ -212,7 +235,7 @@ class MicTest(UiTest):
     # тесты родителя здесь не повторяем
     test_page_loads = test_run_confirm_allow_always = test_commit_message_is_editable = None
     test_undo_confirm = test_diff_on_screen = test_spent_counter_and_expensive_turn = None
-    test_skill_buttons = test_allowed_commands_in_menu = None
+    test_skill_buttons = test_allowed_commands_in_menu = test_twitch_chat = None
 
     def heard(self, *texts):
         """Распознавание отдаёт фразы по очереди, потом — пустоту."""
