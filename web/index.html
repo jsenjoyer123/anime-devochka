@@ -60,11 +60,17 @@
       <span id="quest-xp"></span>
     </button>
     <ol id="quest-list" hidden></ol>
+    <button id="tasks-bar" type="button" title="План задач проекта" hidden>📋 План <span id="tasks-count"></span></button>
+    <div id="tasks-box" hidden>
+      <ul id="tasks-list"></ul>
+      <form id="tasks-form"><input id="tasks-input" placeholder="Новая задача…" autocomplete="off"></form>
+    </div>
     <div id="chat"></div>
     <div id="chips">
       <button type="button" id="next" class="chip" hidden>Дальше →</button>
       <button type="button" id="offer" class="chip" hidden>🔍 Глянь мои правки</button>
       <button type="button" id="twitch-answer" class="chip" hidden>💬 Ответить чату</button>
+      <button type="button" id="ci-fix" class="chip" hidden>🔴 Разобрать падение CI</button>
     </div>
     <button id="learn" hidden>✨ Изучить проект</button>
     <div id="actions">
@@ -73,6 +79,7 @@
       <button type="button" data-action="doc" title="Написать ONBOARDING.md для команды">📄 ONBOARDING</button>
       <button type="button" data-action="first_task" title="Подобрать первую задачу (GitHub issues, TODO)">🎯 Задача</button>
       <button type="button" data-action="quiz" title="Экзамен по проекту">🎓 Экзамен</button>
+      <button type="button" data-action="pr" title="Описание pull request по ветке">🔀 PR</button>
       <button type="button" data-action="commit" title="Придумать сообщение и закоммитить (без push, после подтверждения)">✅ Коммит</button>
     </div>
     <form id="form">

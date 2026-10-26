@@ -21,7 +21,7 @@ build-backend = "setuptools.build_meta"
 # модули лежат в корне, а web/, skills/ и notes/ ищутся рядом с ними — ставить только editable:
 #   uv tool install -e '.[voice]'   или   pip install -e '.[voice]'
 [tool.setuptools]
-py-modules = ["agent", "devtools", "http_api", "llm", "quest", "server", "twitch", "usage", "workspace"]
+py-modules = ["agent", "devtools", "http_api", "llm", "quest", "server", "tasks", "twitch", "usage", "workspace"]
 
 [tool.ruff]
 # Минимум: реальные ошибки и мёртвый код; стиль не полиционируем.

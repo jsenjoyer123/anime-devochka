@@ -412,3 +412,23 @@ body.embed #drop-hint { display: none; }
 @keyframes burst {
   to { transform: translate(var(--dx), var(--dy)) rotate(var(--rot)); opacity: 0; }
 }
+
+/* ---------- план задач ---------- */
+#tasks-bar { margin: 6px 12px 0; padding: 6px 10px; font-size: 12px; background: #f3edff; text-align: left; }
+#tasks-bar[hidden], #tasks-box[hidden] { display: none; }
+#tasks-count { opacity: .6; margin-left: 6px; }
+#tasks-box { margin: 6px 12px 0; padding: 6px 10px; border-radius: 12px; background: #faf7ff; font-size: 13px; max-height: 30vh; overflow: auto; }
+#tasks-list { list-style: none; margin: 0; padding: 0; }
+#tasks-list li { display: flex; align-items: baseline; gap: 6px; margin: 3px 0; }
+#tasks-list li.done { opacity: .55; text-decoration: line-through; }
+#tasks-list li button { margin-left: auto; padding: 0 6px; background: none; opacity: .4; font-size: 11px; }
+#tasks-list li button:hover { opacity: 1; }
+#tasks-input { width: 100%; box-sizing: border-box; margin-top: 4px; padding: 4px 8px; border: 1px solid #e2d8ff; border-radius: 8px; font-size: 12px; }
+
+/* ---------- карточка PR ---------- */
+.msg.pr { max-width: 100%; }
+.msg.pr .pr-title { font-weight: 800; margin-bottom: 6px; }
+.msg.pr .pr-body { margin: 0 0 8px; max-height: 260px; overflow: auto; white-space: pre-wrap; font: 12px/1.45 ui-monospace, monospace;
+  background: #fff8fc; border-radius: 8px; padding: 8px; }
+.msg.pr button { font-size: 12px; padding: 5px 10px; background: #e9e4ff; }
+#actions button.skill { background: #efe9ff; }

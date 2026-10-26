@@ -14,6 +14,7 @@ from pathlib import Path
 
 import devtools
 from quest import Quest
+from tasks import Tasks
 
 HERE = Path(__file__).resolve().parent
 NOTES_DIR = HERE / "notes"
@@ -91,6 +92,7 @@ class Workspace:
         self.commits_path = notes_path.with_suffix(".commits.json")  # её коммиты: отменять можно только их
         self.summary_path = notes_path.with_suffix(".summary.md")  # резюме старой части разговора
         self.quest = Quest(notes_path.with_suffix(".quest.json"))
+        self.tasks = Tasks(notes_path.with_suffix(".tasks.json"))
 
     def _resolve(self, rel: str) -> Path:
         p = (self.root / rel).resolve()
@@ -410,6 +412,24 @@ class Workspace:
     def github_issue(self, number: int) -> str:
         return devtools.github_issue(self.root, number)
 
+    def branch_diff(self, base: str | None = None) -> str:
+        return devtools.branch_diff(self.root, base)
+
+    def ci_status(self) -> str:
+        return devtools.ci_status(self.root)
+
+    def add_task(self, text: str) -> str:
+        t = self.tasks.add(text)
+        return f"Записала в план: №{t['id']} {t['text']}"
+
+    def complete_task(self, id: int) -> str:
+        t = self.tasks.set_done(id)
+        return f"Задача №{t['id']} сделана: {t['text']}"
+
+    def remove_task(self, id: int) -> str:
+        self.tasks.remove(id)
+        return f"Убрала задачу №{id} из плана"
+
     def complete_quest(self, step: str) -> str:
         first = self.quest.complete(step)
         st = self.quest.state()
@@ -424,7 +444,9 @@ class Workspace:
               "git_log": self.git_log, "git_show": self.git_show, "git_blame": self.git_blame,
               "git_hotspots": self.git_hotspots, "git_diff": self.git_diff,
               "github_issues": self.github_issues, "github_issue": self.github_issue,
-              "complete_quest": self.complete_quest}.get(name)
+              "complete_quest": self.complete_quest, "add_task": self.add_task, "ci_status": self.ci_status,
+              "branch_diff": self.branch_diff,
+              "complete_task": self.complete_task, "remove_task": self.remove_task}.get(name)
         if fn is None:
             return f"Неизвестный инструмент: {name}"
         try:

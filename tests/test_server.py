@@ -4,6 +4,7 @@
 Модель не вызывается — вместо неё подставляется сценарий ответов.
 """
 
+import io
 import json
 import os
 import shutil
@@ -300,6 +301,28 @@ class HttpTest(Base):
         self.assertIn("vasya: Айко, на чём написан проект?", prompt)
         self.assertEqual(self.post("/api/chat", {"action": "twitch"})[0], 400)  # всё уже отвечено
 
+    def test_tasks_endpoint(self):
+        self.assertEqual(self.post("/api/tasks", {"add": "купить кофе"})[1]["tasks"][0]["text"], "купить кофе")
+        self.assertTrue(self.post("/api/tasks", {"id": 1, "done": True})[1]["tasks"][0]["done"])
+        self.assertEqual(self.post("/api/tasks", {"id": 7, "done": True})[0], 400)
+        self.assertEqual(self.post("/api/tasks", {"remove": 1}), (200, {"tasks": []}))
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/status", timeout=5) as r:
+            self.assertEqual(json.load(r)["tasks"], [])
+
+    def test_ci_endpoint_survives_github_errors(self):
+        original = devtools.ci_runs
+
+        def broken(root):
+            raise RuntimeError("GitHub ограничил запросы")
+        devtools.ci_runs = broken
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/ci", timeout=5) as r:
+                self.assertEqual(json.load(r)["state"], "unknown")
+        finally:
+            devtools.ci_runs = original
+        with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/ci", timeout=5) as r:
+            self.assertEqual(json.load(r)["state"], "none")  # не GitHub-проект
+
     def test_annotations_endpoint(self):
         http_api.AGENT.set_annotations([{"path": "src/app.py", "line": 1, "message": "хм"}])
         with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/annotations", timeout=5) as r:
@@ -372,6 +395,58 @@ class GithubTest(Base):
         out = devtools.github_issues(self.root, limit=2)
         self.assertNotIn("bump", out)
         self.assertEqual(out.count("Опечатка"), 2)
+
+    def test_ci_runs(self):
+        sha = devtools.head(self.root)
+        calls = []
+
+        def fake(path):
+            calls.append(path)
+            if path.endswith("/jobs"):
+                return {"jobs": [{"name": "tests (3.10)", "conclusion": "success", "steps": []},
+                                 {"name": "e2e", "conclusion": "failure", "html_url": "u",
+                                  "steps": [{"name": "setup", "conclusion": "success"},
+                                            {"name": "E2E", "conclusion": "failure"}]}]}
+            return {"workflow_runs": runs}
+        devtools._github = fake
+        runs = []
+        self.assertEqual(devtools.ci_runs(self.root)["state"], "none")
+        self.assertIn(f"head_sha={sha}", calls[0])
+        runs = [{"id": 1, "name": "tests", "status": "in_progress", "conclusion": None}]
+        self.assertEqual(devtools.ci_runs(self.root)["state"], "pending")
+        runs = [{"id": 1, "name": "tests", "status": "completed", "conclusion": "failure", "html_url": "r"}]
+        ci = devtools.ci_runs(self.root)
+        self.assertEqual((ci["state"], ci["runs"][0]["failed"]), ("failure", [{"job": "e2e", "steps": ["E2E"], "url": "u"}]))
+        self.assertIn("упала задача «e2e», шаги: E2E", devtools.ci_status(self.root))
+        runs = [{"id": 1, "name": "tests", "status": "completed", "conclusion": "success"}]
+        self.assertEqual(devtools.ci_runs(self.root)["state"], "success")
+
+    def test_etag_cache(self):
+        class Resp(io.BytesIO):
+            headers = {"ETag": '"v1"'}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+        sent = []
+
+        def urlopen(req, timeout):
+            sent.append(req.get_header("If-none-match"))
+            if len(sent) == 1:
+                return Resp(b'{"n": 1}')
+            raise urllib.error.HTTPError(req.full_url, 304, "Not Modified", {}, None)
+        original = urllib.request.urlopen
+        urllib.request.urlopen = urlopen
+        devtools._ETAGS.clear()
+        try:
+            self.assertEqual(self._github("/x"), {"n": 1})
+            self.assertEqual(self._github("/x"), {"n": 1})  # 304 → из кэша
+        finally:
+            urllib.request.urlopen = original
+            devtools._ETAGS.clear()
+        self.assertEqual(sent, [None, '"v1"'])
 
     def test_offline_is_reported(self):
         def offline(path):
@@ -505,6 +580,38 @@ class UndoCommitTest(GitUserBase):
         self.assertFalse([e for e in events if e["type"] == "confirm"])
 
 
+class TasksTest(Base):
+    def test_plan_lifecycle(self):
+        t = self.ws.tasks
+        self.assertEqual(t.add("  починить   CI  ")["text"], "починить CI")
+        t.add("написать тесты для `quest.py`")
+        t.set_done("1")  # модель может прислать номер строкой
+        self.assertEqual([(x["id"], x["done"]) for x in t.items()], [(2, False), (1, True)])  # открытые выше
+        self.assertIn("№2 написать тесты", t.prompt_hint())
+        self.assertNotIn("починить CI", t.prompt_hint())
+        t.remove(1)
+        self.assertEqual(t.add("ещё")["id"], 3)  # номера не переиспользуются
+        for bad in (lambda: t.add("   "), lambda: t.set_done(99), lambda: t.remove(99)):
+            with self.assertRaises(ValueError):
+                bad()
+
+    def test_agent_tools(self):
+        agent = agent_mod.Agent(self.ws, "key", "model")
+        agent._llm = scripted(
+            {"role": "assistant", "content": None, "tool_calls": [
+                tool_call("1", "add_task", text="поправить README"), tool_call("2", "complete_task", id=1),
+                tool_call("3", "complete_task", id=42)]},
+            {"role": "assistant", "content": "записала"},
+        )
+        events = []
+        agent.run("запиши", events.append)
+        results = [m["content"] for m in agent.history if m["role"] == "tool"]
+        self.assertEqual(results[0], "Записала в план: №1 поправить README")
+        self.assertIn("Нет задачи №42", results[2])
+        self.assertEqual(len([e for e in events if e["type"] == "tasks"]), 2)  # на ошибку — без события
+        self.assertTrue(self.ws.tasks.items()[0]["done"])
+
+
 class EditTest(Base):
     def test_plan_and_apply(self):
         plan = self.ws.plan_edit("src/app.py", [{"old": "return 42", "new": "return 43"}])
@@ -593,6 +700,35 @@ class EditTest(Base):
                                                                        {"old": "43", "new": "44"}])
         self.assertIn("+2 −2", result)
         self.assertEqual((self.root / "src" / "app.py").read_text(), "def run():\n    return 44\n")
+
+
+class PrTest(GitUserBase):
+    def test_branch_diff(self):
+        git = ["git", "-C", str(self.root)]
+        subprocess.run([*git, "branch", "-M", "main"], check=True)
+        self.assertEqual(devtools.default_branch(self.root), "main")
+        self.assertIn("новых коммитов нет", devtools.branch_diff(self.root))
+        subprocess.run([*git, "checkout", "-qb", "feature/seven"], check=True)
+        subprocess.run([*git, "commit", "-qam", "main возвращает 7"], check=True)
+        out = devtools.branch_diff(self.root)
+        self.assertIn("Ветка feature/seven против main", out)
+        self.assertIn("main возвращает 7", out)
+        self.assertIn("+    return 7", out)
+        self.assertIn("Некорректное", devtools.branch_diff(self.root, "--output=/tmp/x"))
+        self.assertIn("unknown revision", devtools.branch_diff(self.root, "nope"))
+
+    def test_write_pr_event(self):
+        agent = agent_mod.Agent(self.ws, "key", "model")
+        agent._llm = scripted(
+            {"role": "assistant", "content": None, "tool_calls": [
+                tool_call("1", "write_pr", title="  Семёрка   вместо 42 ", body="## Зачем\nПотому что."),
+                tool_call("2", "write_pr", title="", body="x")]},
+            {"role": "assistant", "content": "готово"},
+        )
+        events = []
+        agent.run("pr", events.append)
+        self.assertEqual([e for e in events if e["type"] == "pr"],
+                         [{"type": "pr", "title": "Семёрка вместо 42", "body": "## Зачем\nПотому что."}])
 
 
 class DiffTest(Base):

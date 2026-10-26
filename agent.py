@@ -77,6 +77,10 @@ git_hotspots, git_diff. Команды (тесты, сборку, линтер) 
 верные, первая задача выбрана) — и радуйся вместе с семпаем. Задачи проекта на GitHub \
 смотри через github_issues и github_issue.
 
+Ты ведёшь с семпаем план задач проекта: add_task — записать (когда договорились что-то сделать \
+потом, нашли баг, семпай просит «запиши»), complete_task — отметить сделанное, remove_task — убрать \
+лишнее. Задачи формулируй коротко и конкретно, с путями к файлам.
+
 Ты умеешь ставить напоминания set_reminder: «напомни через 20 минут», помидорки \
 (25 минут работы, 5 отдыха), перерывы для глаз. Напоминание сработает в браузере.
 
@@ -129,6 +133,17 @@ NEW_COMMIT_TASK = """(Системное событие, не сообщение
 одной-двумя фразами, как стример: похвали, подколи или удивись по сути изменений \
 («о, рефакторинг auth, смело!»). Если это не новый коммит, а pull или смена ветки — отреагируй на это. \
 Ничего не показывай на экране и ревью не устраивай."""
+
+PR_TASK = """Семпай хочет открыть pull request. Посмотри branch_diff (что в ветке против основной) \
+и git_log основной ветки — какой там стиль. Напиши PR: заголовок до 70 символов и описание в Markdown \
+по-русски (или на языке истории проекта): зачем, что поменялось (по пунктам, со ссылками на файлы), \
+как проверить, на что смотреть ревьюеру, риски. Без воды и без тегов эмоций. Отдай его через write_pr, \
+а в ответе коротко скажи, что получилось. Если новых коммитов нет — так и скажи, write_pr не вызывай."""
+
+CI_FAIL_TASK = """CI на GitHub упал на последнем коммите семпая. Посмотри ci_status (какая задача и шаг \
+упали), git_show HEAD (что поменялось) и найди вероятную причину в коде: запусти тот же шаг локально \
+через run_command, если понятно как (семпай подтвердит), или прочитай нужные файлы. Объясни коротко \
+и предложи исправление — можешь сразу через edit_file. Логи CI тебе недоступны: не выдумывай их."""
 
 TRACE_TASK = """Семпай прислал ошибку со стектрейсом (ниже). Разберись по-настоящему: вытащи из трейса \
 пути и номера строк, которые относятся к этому проекту (библиотечные кадры пропускай), открой их \
@@ -210,7 +225,8 @@ LEARN_TASK = """Семпай попросил тебя пройти онборд
 
 # сценарные задания: кнопки и служебные события подставляют текст вместо сообщения семпая
 TASKS = {"learn": LEARN_TASK, "idle": IDLE_TASK, "tour": TOUR_TASK, "review": REVIEW_TASK,
-         "doc": DOC_TASK, "first_task": FIRST_TASK, "quiz": QUIZ_TASK, "commit": COMMIT_TASK,
+         "doc": DOC_TASK, "first_task": FIRST_TASK, "quiz": QUIZ_TASK, "commit": COMMIT_TASK, "ci_fail": CI_FAIL_TASK,
+         "pr": PR_TASK,
          "new_commit": NEW_COMMIT_TASK}
 
 TOOLS = [
@@ -282,6 +298,21 @@ TOOLS = [
         }, "required": ["minutes", "text"]},
     }},
     {"type": "function", "function": {
+        "name": "add_task",
+        "description": "Добавить задачу в план проекта (одна строка, конкретно).",
+        "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+    }},
+    {"type": "function", "function": {
+        "name": "complete_task",
+        "description": "Отметить задачу плана сделанной по её номеру.",
+        "parameters": {"type": "object", "properties": {"id": {"type": "integer"}}, "required": ["id"]},
+    }},
+    {"type": "function", "function": {
+        "name": "remove_task",
+        "description": "Убрать задачу из плана (неактуальна, дубль).",
+        "parameters": {"type": "object", "properties": {"id": {"type": "integer"}}, "required": ["id"]},
+    }},
+    {"type": "function", "function": {
         "name": "complete_quest",
         "description": "Отметить выполненный шаг онбординг-квеста семпая.",
         "parameters": {"type": "object", "properties": {
@@ -295,6 +326,26 @@ TOOLS = [
             "label": {"type": "string", "description": "Например good first issue, help wanted, bug"},
             "limit": {"type": "integer", "default": 15},
         }},
+    }},
+    {"type": "function", "function": {
+        "name": "branch_diff",
+        "description": "Что в текущей ветке по сравнению с основной (main/master или base): коммиты, файлы, diff.",
+        "parameters": {"type": "object", "properties": {
+            "base": {"type": "string", "description": "С какой веткой сравнивать; по умолчанию основная"},
+        }},
+    }},
+    {"type": "function", "function": {
+        "name": "write_pr",
+        "description": "Отдать семпаю готовый PR: карточка в чате с кнопкой «Скопировать».",
+        "parameters": {"type": "object", "properties": {
+            "title": {"type": "string"},
+            "body": {"type": "string", "description": "Описание в Markdown"},
+        }, "required": ["title", "body"]},
+    }},
+    {"type": "function", "function": {
+        "name": "ci_status",
+        "description": "Статус GitHub Actions для текущего коммита: какие прогоны, что упало (задача и шаг).",
+        "parameters": {"type": "object", "properties": {}},
     }},
     {"type": "function", "function": {
         "name": "github_issue",
@@ -491,8 +542,18 @@ def describe_call(name: str, args: dict) -> str:
         return "хочу отменить свой коммит ↶"
     if name.startswith("github_"):
         return "смотрю задачи на GitHub"
+    if name == "ci_status":
+        return "смотрю CI на GitHub 🚦"
+    if name == "branch_diff":
+        return "сравниваю ветку с основной 🔀"
+    if name == "write_pr":
+        return "пишу описание PR ✎"
     if name == "complete_quest":
         return "отмечаю шаг квеста ★"
+    if name == "add_task":
+        return "записываю в план 📋"
+    if name in ("complete_task", "remove_task"):
+        return "обновляю план 📋"
     if name == "set_reminder":
         return f"завожу будильник на {args.get('minutes')} мин ⏰"
     if name == "run_command":
@@ -521,6 +582,7 @@ class Agent:
         s += f"Сегодня {datetime.date.today():%d.%m.%Y}{season_hint()}.\n"
         s += mood_hint(self.mood)
         s += self.ws.quest.prompt_hint()
+        s += self.ws.tasks.prompt_hint()
         if workspace.SENPAI_PATH.is_file():
             s += "\nЧто ты помнишь о семпае:\n" + workspace.SENPAI_PATH.read_text(encoding="utf-8")
         if self.ws.summary_path.is_file():
@@ -810,6 +872,13 @@ class Agent:
                 emit({"type": "annotations", "notes": notes})
                 return (f"Оставила в редакторе {len(notes)} замечаний (если у семпая VS Code с расширением)."
                         if notes else "Замечания из редактора убраны.")
+            if name == "write_pr":
+                title = " ".join(str(args["title"]).split())[:120]
+                body = str(args["body"]).strip()[:20_000]
+                if not title or not body:
+                    return "Нужны и заголовок, и описание."
+                emit({"type": "pr", "title": title, "body": body})
+                return "PR в чате, семпай может скопировать."
             if name == "show_diagram":
                 emit({"type": "diagram", "title": str(args.get("title") or "")[:120],
                       "mermaid": str(args["mermaid"])[:8000]})
@@ -840,6 +909,8 @@ class Agent:
             emit({"type": "outfit", "outfit": self.ws.outfit()})
         elif name == "write_onboarding_doc":
             emit({"type": "doc", "url": "/api/onboarding"})
+        elif name in ("add_task", "complete_task", "remove_task") and not result.startswith("Ошибка"):
+            emit({"type": "tasks", "tasks": self.ws.tasks.items()})
         # некоторые шаги квеста засчитываются сами
         auto = {"write_notes": "learn", "write_onboarding_doc": "doc"}.get(name)
         if auto and not result.startswith("Ошибка"):

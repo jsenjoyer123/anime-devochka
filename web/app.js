@@ -609,6 +609,24 @@ function addMessage(kind, text) {
   return div;
 }
 
+/** Карточка PR: заголовок, описание и «Скопировать» (заголовок первой строкой — как в `gh pr create`). */
+function showPr({ title, body }) {
+  const div = addMessage("aiko pr", "");
+  const head = Object.assign(document.createElement("div"), { className: "pr-title", textContent: `🔀 ${title}` });
+  const text = Object.assign(document.createElement("pre"), { className: "pr-body", textContent: body });
+  const copy = Object.assign(document.createElement("button"), { type: "button", textContent: "📋 Скопировать" });
+  copy.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(`${title}\n\n${body}`);
+      copy.textContent = "✅ Скопировано";
+    } catch {
+      copy.textContent = "Не вышло — выдели текст вручную";
+    }
+  };
+  div.append(head, text, copy);
+  chat.scrollTop = chat.scrollHeight;
+}
+
 /** Айко просит разрешения запустить команду или закоммитить — решает только семпай. */
 function askConfirm(ev) {
   const commit = ev.kind === "commit";
@@ -784,10 +802,16 @@ function handleEvent(ev) {
   } else if (ev.type === "usage") {
     turnCost += ev.cost;
     showSpent(ev.today);
+  } else if (ev.type === "pr") {
+    showPr(ev);
+  } else if (ev.type === "tasks") {
+    renderTasks(ev.tasks);
+    $("tasks-box").hidden = false;
   } else if (ev.type === "edited") {
     lastSig = pendingSig = null; // свои правки она уже видела — не предлагать на них ревью
   } else if (ev.type === "head") {
     lastHead = ev.head; // HEAD сдвинула она сама (коммит или отмена) — реагировать не нужно
+    if (watching) watchCi();
   } else if (ev.type === "reminder") {
     addReminder(ev.minutes, ev.text);
   } else if (ev.type === "quest") {
@@ -853,6 +877,7 @@ const ACTION_LABELS = {
   first_task: "Айко, помоги выбрать первую задачу 🎯",
   quiz: "Айко, устрой мне экзамен по проекту 🎓",
   commit: "Айко, помоги закоммитить ✅",
+  pr: "Айко, напиши описание PR 🔀",
 };
 function bindAction(btn) {
   btn.onclick = () => {
@@ -1043,6 +1068,7 @@ async function refreshStatus() {
     learnBtn.classList.toggle("stale", Boolean(s.stale_commits));
     renderQuest(s.quest);
     renderSkills(s.skills);
+    renderTasks(s.tasks);
     if (!greeted) {
       greeted = true;
       // чат с прошлого раза: сервер помнит последние реплики
@@ -1320,6 +1346,7 @@ async function pollChanges() {
   if (c.head && c.head !== lastHead) {
     // новый коммит: правки ушли в историю, предлагать ревью уже поздно — лучше прокомментировать
     lastHead = c.head;
+    watchCi();
     lastSig = c.sig;
     pendingSig = null;
     $("offer").hidden = true;
@@ -1345,6 +1372,93 @@ $("offer").onclick = () => {
   $("offer").hidden = true;
   addMessage("user", ACTION_LABELS.review);
   ask({ action: "review" });
+};
+
+// ---------- план задач проекта: ведут вместе Айко (инструменты) и семпай (галочки) ----------
+$("tasks-bar").onclick = () => { $("tasks-box").hidden = !$("tasks-box").hidden; };
+
+async function tasksApi(body) {
+  const res = await fetch("/api/tasks", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).catch(() => null);
+  const data = await res?.json().catch(() => null);
+  if (res?.ok) renderTasks(data.tasks);
+  else addMessage("error", data?.error || "План не сохранился");
+}
+
+function renderTasks(tasks) {
+  if (!tasks || OBS) return;
+  const open = tasks.filter((t) => !t.done).length;
+  $("tasks-bar").hidden = false;
+  $("tasks-count").textContent = tasks.length ? `${open} открыто` : "пусто";
+  $("tasks-list").replaceChildren(...tasks.map((t) => {
+    const li = document.createElement("li");
+    li.className = t.done ? "done" : "";
+    const box = Object.assign(document.createElement("input"), { type: "checkbox", checked: t.done });
+    box.onchange = () => tasksApi({ id: t.id, done: box.checked });
+    const del = Object.assign(document.createElement("button"), { type: "button", textContent: "✕", title: "Убрать" });
+    del.onclick = () => tasksApi({ remove: t.id });
+    li.append(box, ` №${t.id} ${t.text} `, del);
+    return li;
+  }));
+}
+
+$("tasks-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const text = $("tasks-input").value.trim();
+  if (!text) return;
+  $("tasks-input").value = "";
+  tasksApi({ add: text });
+});
+
+// ---------- 🚦 CI: после нового коммита ждём GitHub Actions и рассказываем, чем кончилось ----------
+// без GITHUB_TOKEN у GitHub 60 запросов в час на всех — опрашиваем редко и недолго (≤5 на коммит)
+const CI_EVERY_MS = { token: 90_000, anon: 4 * 60_000 };
+const CI_WATCH_FOR_MS = { token: 30 * 60_000, anon: 20 * 60_000 }; // коммит могут запушить не сразу
+const CI_SEEN_KEY = "aiko-ci-seen";    // о каком коммите уже рассказала
+let ciTimer = null;
+let ciUntil = 0;
+
+let ciAuth = "anon";
+function watchCi() {
+  ciUntil = performance.now() + CI_WATCH_FOR_MS[ciAuth];
+  clearTimeout(ciTimer);
+  ciTimer = setTimeout(checkCi, 5_000);
+}
+
+async function checkCi() {
+  ciTimer = null;
+  let ci;
+  try { ci = await (await fetch("/api/ci")).json(); } catch { ci = { state: "unknown" }; }
+  if (ci.token !== undefined) ciAuth = ci.token ? "token" : "anon";
+  if (ci.error) return; // GitHub ограничил запросы или недоступен — не долбим его дальше
+  const final = ci.state === "success" || ci.state === "failure";
+  if (final && localStorage.getItem(CI_SEEN_KEY) !== ci.sha) {
+    localStorage.setItem(CI_SEEN_KEY, ci.sha);
+    announceCi(ci);
+  }
+  if (!final && performance.now() < ciUntil) ciTimer = setTimeout(checkCi, CI_EVERY_MS[ciAuth]);
+}
+
+function announceCi(ci) {
+  const sha = ci.sha.slice(0, 7);
+  if (ci.state === "success") {
+    addMessage("tool", `🚦 CI зелёный для ${sha}`);
+    enqueueSpeech(pick(["[cheer] CI зелёный! Всё прошло, семпай!", "[happy] [clap] Ура, CI позеленел. Можно выдохнуть."]));
+    return;
+  }
+  const failed = ci.runs.flatMap((r) => r.failed.map((f) => `${f.job}${f.steps.length ? ` → ${f.steps.join(", ")}` : ""}`));
+  addMessage("aiko", `🔴 CI упал для ${sha}${failed.length ? `: ${failed.join("; ")}` : ""}`);
+  enqueueSpeech("[surprised] Ой-ой, семпай, CI покраснел! Хочешь, разберусь?");
+  $("ci-fix").hidden = false;
+}
+
+$("ci-fix").onclick = () => {
+  $("ci-fix").hidden = true;
+  addMessage("user", "Айко, разберись, почему упал CI 🔴");
+  ask({ action: "ci_fail" });
 };
 
 // ---------- онбординг-квест ----------

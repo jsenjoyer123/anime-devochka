@@ -105,6 +105,36 @@ def screen_diff(root: Path, rel: str | None = None, staged: bool = False, commit
     return "\n".join(line[:300] for line in lines)
 
 
+def default_branch(root: Path) -> str | None:
+    """Основная ветка: куда смотрит origin/HEAD, иначе main или master (сначала на origin)."""
+    ref = _git(root, "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD")
+    if ref.startswith("origin/"):
+        return ref
+    for name in ("origin/main", "origin/master", "main", "master"):
+        if re.fullmatch(r"[0-9a-f]{40,64}", _git(root, "rev-parse", "--verify", "-q", name)):
+            return name
+    return None
+
+
+BRANCH_RE = re.compile(r"^[\w./-]{1,100}$")
+
+
+def branch_diff(root: Path, base: str | None = None) -> str:
+    """Что в текущей ветке по сравнению с base: коммиты, файлы и diff (для описания PR)."""
+    base = base or default_branch(root)
+    if not base:
+        return "Не нашла основную ветку (main/master) — укажи base."
+    if not BRANCH_RE.match(base) or base.startswith("-"):
+        return "Некорректное имя ветки."
+    log = _git(root, "log", "--format=%h %s", f"{base}..HEAD")
+    if log in ("(пусто)",) or log.startswith(("Это не", "git ")) or "unknown revision" in log:
+        return f"Относительно {base} новых коммитов нет." if log == "(пусто)" else log
+    branch = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
+    stat = _git(root, "diff", "--stat", "--no-ext-diff", f"{base}...HEAD")
+    patch = _git(root, "diff", "--patch", "--no-ext-diff", "--no-textconv", f"{base}...HEAD")
+    return f"Ветка {branch} против {base}.\nКоммиты:\n{log}\n\n{stat}\n\n{patch}"[:MAX_GIT_CHARS]
+
+
 def changes(root: Path) -> dict:
     """Что поменялось в рабочей копии: подпись (чтобы заметить новые правки) и список файлов."""
     status = _git(root, "status", "--porcelain=v1", "--untracked-files=normal")
@@ -193,15 +223,31 @@ def github_repo(root: Path) -> tuple[str, str] | None:
     return (m.group(1), m.group(2)) if m else None
 
 
+# ETag-кэш: на «304 не изменилось» тело не качаем. В лимит 304 не засчитывается только с GITHUB_TOKEN —
+# без токена (60 запросов в час на IP) каждый запрос на счету, поэтому браузер опрашивает CI реже
+_ETAGS: dict[str, tuple[str, object]] = {}
+MAX_ETAGS = 200
+
+
 def _github(path: str) -> list | dict:
     headers = {"Accept": "application/vnd.github+json", "User-Agent": "aiko-chan"}
     if os.environ.get("GITHUB_TOKEN"):  # для приватных репозиториев и большего лимита запросов
         headers["Authorization"] = f"Bearer {os.environ['GITHUB_TOKEN']}"
+    cached = _ETAGS.get(path)
+    if cached:
+        headers["If-None-Match"] = cached[0]
     req = urllib.request.Request(GITHUB_API + path, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.load(resp)
+            data = json.load(resp)
+            if etag := resp.headers.get("ETag"):
+                if len(_ETAGS) >= MAX_ETAGS:
+                    _ETAGS.pop(next(iter(_ETAGS)))
+                _ETAGS[path] = (etag, data)
+            return data
     except urllib.error.HTTPError as e:
+        if e.code == 304 and cached:
+            return cached[1]
         if e.code == 404:
             raise RuntimeError("Репозиторий не найден (приватный? добавь GITHUB_TOKEN в .env)") from e
         if e.code == 403:
@@ -244,6 +290,48 @@ def github_issue(root: Path, number: int) -> str:
         for c in _github(base + "/comments?per_page=5"):
             out.append(f"— {c['user']['login']}: {(c.get('body') or '')[:800]}")
     return "\n\n".join(out)
+
+
+def ci_runs(root: Path) -> dict:
+    """GitHub Actions для текущего коммита: state none|pending|success|failure и прогоны.
+    none — коммит не запушен, CI нет или проект не на GitHub."""
+    repo, sha = github_repo(root), head(root)
+    if not repo or not sha:
+        return {"state": "none", "sha": sha, "runs": []}
+    base = f"/repos/{repo[0]}/{repo[1]}/actions"
+    data = _github(f"{base}/runs?head_sha={sha}&per_page=10")
+    runs = []
+    for r in data.get("workflow_runs", []):
+        run = {"name": r.get("name"), "status": r.get("status"), "conclusion": r.get("conclusion"),
+               "url": r.get("html_url"), "failed": []}
+        if r.get("conclusion") == "failure":
+            for j in _github(f"{base}/runs/{r['id']}/jobs").get("jobs", []):
+                if j.get("conclusion") == "failure":
+                    steps = [s["name"] for s in j.get("steps", []) if s.get("conclusion") == "failure"]
+                    run["failed"].append({"job": j.get("name"), "steps": steps, "url": j.get("html_url")})
+        runs.append(run)
+    if not runs:
+        state = "none"
+    elif any(r["status"] != "completed" for r in runs):
+        state = "pending"
+    elif any(r["conclusion"] in ("failure", "timed_out", "startup_failure") for r in runs):
+        state = "failure"
+    else:
+        state = "success"
+    return {"state": state, "sha": sha, "runs": runs}
+
+
+def ci_status(root: Path) -> str:
+    """Человеческий отчёт о CI для модели."""
+    ci = ci_runs(root)
+    if ci["state"] == "none":
+        return "Для текущего коммита прогонов CI нет (не запушен, CI не настроен или проект не на GitHub)."
+    lines = [f"CI для {ci['sha'][:8]}: {ci['state']}"]
+    for r in ci["runs"]:
+        lines.append(f"- {r['name']}: {r['conclusion'] or r['status']} {r['url']}")
+        for f in r["failed"]:
+            lines.append(f"    упала задача «{f['job']}», шаги: {', '.join(f['steps']) or '?'}")
+    return "\n".join(lines)
 
 
 def run_command(root: Path, command: str) -> str:

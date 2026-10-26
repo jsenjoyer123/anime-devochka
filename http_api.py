@@ -4,6 +4,7 @@ HTTP-слой Айко: статика web/, API чата/голоса/прое�
 """
 
 import json
+import os
 import queue
 import threading
 import urllib.parse
@@ -115,6 +116,12 @@ class Handler(SimpleHTTPRequestHandler):
             return self._events()
         if self.path == "/api/changes":
             return self._json(200, devtools.changes(agent.ws.root))
+        if self.path == "/api/ci":
+            token = bool(os.environ.get("GITHUB_TOKEN"))  # с токеном лимит больше — можно опрашивать чаще
+            try:
+                return self._json(200, {**devtools.ci_runs(agent.ws.root), "token": token})
+            except RuntimeError as e:  # GitHub недоступен или ограничил запросы
+                return self._json(200, {"state": "unknown", "error": str(e), "runs": [], "token": token})
         if self.path.startswith("/api/twitch"):
             return self._twitch()
         if self.path == "/api/annotations":
@@ -138,6 +145,7 @@ class Handler(SimpleHTTPRequestHandler):
                 "allowed": agent.ws.allowed_commands(),
                 "spent_today": usage.today()["cost"],
                 "twitch": TWITCH.channel if TWITCH else None,
+                "tasks": agent.ws.tasks.items(),
             })
         if self.path == "/api/onboarding":
             return self._onboarding(agent)
@@ -210,7 +218,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         if self.path not in ("/api/chat", "/api/tts", "/api/confirm", "/api/stt", "/api/project", "/api/broadcast",
-                             "/api/context", "/api/allowed", "/api/annotations"):
+                             "/api/context", "/api/allowed", "/api/annotations", "/api/tasks"):
             return self._json(404, {"error": "not found"})
         if not self._same_origin():
             return self._json(403, {"error": "forbidden"})
@@ -237,6 +245,18 @@ class Handler(SimpleHTTPRequestHandler):
             ok = agent.resolve_confirm(str(body.get("id", "")), body.get("approve") is True,
                                        edited if isinstance(edited, str) else None, body.get("always") is True)
             return self._json(200 if ok else 404, {"ok": ok})
+        if self.path == "/api/tasks":
+            # галочки и добавление задач из панели: семпай ведёт план вместе с Айко
+            try:
+                if body.get("add"):
+                    agent.ws.tasks.add(str(body["add"]))
+                elif "remove" in body:
+                    agent.ws.tasks.remove(int(body["remove"]))
+                else:
+                    agent.ws.tasks.set_done(int(body.get("id")), body.get("done") is True)
+            except (ValueError, TypeError) as e:
+                return self._json(400, {"error": str(e)})
+            return self._json(200, {"tasks": agent.ws.tasks.items()})
         if self.path == "/api/annotations":
             agent.set_annotations([])  # «убрать замечания» из VS Code
             return self._json(200, {"ok": True})
@@ -283,14 +303,20 @@ class Handler(SimpleHTTPRequestHandler):
         if not agent.lock.acquire(blocking=False):
             return self._json(409, {"error": "Айко ещё думает над прошлым вопросом"})
 
-        # ответ стримим построчно (NDJSON), чтобы аватар реагировал на каждый шаг
+        # ответ стримим построчно (NDJSON), чтобы аватар реагировал на каждый шаг. Кусками chunked:
+        # конец ответа виден клиенту по последнему куску, а не по закрытию соединения — иначе
+        # часть клиентов изредка ловит RST вместо конца потока
+        self.protocol_version = "HTTP/1.1"
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("Connection", "close")
         self.end_headers()
 
         def emit(event: dict) -> None:
-            self.wfile.write((json.dumps(event, ensure_ascii=False) + "\n").encode())
+            data = (json.dumps(event, ensure_ascii=False) + "\n").encode()
+            self.wfile.write(b"%x\r\n%s\r\n" % (len(data), data))
             self.wfile.flush()
 
         try:
@@ -304,6 +330,10 @@ class Handler(SimpleHTTPRequestHandler):
                 pass
         finally:
             agent.lock.release()
+            try:
+                self.wfile.write(b"0\r\n\r\n")  # последний кусок: ответ закончен
+            except OSError:
+                pass
 
     def _stt(self, length: int) -> None:
         if self.headers.get("Content-Type") != "audio/wav":

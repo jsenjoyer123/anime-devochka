@@ -5,6 +5,7 @@
 Нужен интернет: three.js и three-vrm грузятся с CDN.
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -26,6 +27,23 @@ import http_api  # noqa: E402
 import twitch  # noqa: E402
 import usage  # noqa: E402
 import workspace  # noqa: E402
+
+# three.js, three-vrm и модель с CDN кэшируем на диске: тесты быстрее и не падают от медленной сети
+CDN_CACHE = Path(os.environ.get("AIKO_E2E_CACHE") or Path.home() / ".cache" / "aiko-e2e")
+
+
+def cached_cdn(route) -> None:
+    key = CDN_CACHE / hashlib.sha1(route.request.url.encode()).hexdigest()
+    if not key.is_file():
+        resp = route.fetch(timeout=60_000)
+        if not resp.ok:
+            return route.fulfill(response=resp)
+        CDN_CACHE.mkdir(parents=True, exist_ok=True)
+        key.with_suffix(".type").write_text(resp.headers.get("content-type", "application/octet-stream"))
+        key.write_bytes(resp.body())
+    route.fulfill(body=key.read_bytes(), content_type=key.with_suffix(".type").read_text(),
+                  headers={"Access-Control-Allow-Origin": "*"})
+
 
 SYSTEM_CHROMIUM = os.environ.get("AIKO_CHROMIUM") or shutil.which("chromium") or shutil.which("google-chrome")
 
@@ -71,6 +89,8 @@ class UiTest(unittest.TestCase):
         self.confirms = []  # что страница отправила в /api/confirm
         self.page.route("**/api/confirm", self._confirm)
         self.page.route("**/api/tts", lambda route: route.fulfill(status=501, json={"error": "нет"}))
+        for cdn in ("https://cdn.jsdelivr.net/**", "https://pixiv.github.io/**"):
+            self.page.route(cdn, cached_cdn)
 
     def tearDown(self):
         self.page.close()
@@ -174,8 +194,7 @@ class UiTest(unittest.TestCase):
             route.fulfill(body=json.dumps({"type": "reply", "text": "готово"}) + "\n")
         self.page.route("**/api/chat", chat)
         self.open()
-        btn = self.page.locator("#actions button.skill", has_text="Тесты")
-        btn.click()
+        self.page.click("#actions button.skill[data-action='skill:tests']")
         self.page.wait_for_selector("text=готово")
         self.assertEqual(sent[0]["action"], "skill:tests")
 
@@ -200,6 +219,54 @@ class UiTest(unittest.TestCase):
         self.page.wait_for_selector("text=@vasya, привет!")
         self.assertEqual(sent, ["twitch"])
         self.assertFalse(self.page.is_visible("#twitch-answer"))
+
+    def test_task_plan(self):
+        self.agent.ws.tasks.add("починить CI")
+        self.open()
+        self.page.wait_for_selector("#tasks-bar:has-text('1 открыто')")
+        self.page.click("#tasks-bar")
+        self.page.fill("#tasks-input", "написать тесты")
+        self.page.press("#tasks-input", "Enter")
+        self.page.wait_for_selector("#tasks-list li:has-text('№2 написать тесты')")
+        self.page.check("#tasks-list li:has-text('починить CI') input")
+        self.page.wait_for_selector("#tasks-list li.done:has-text('починить CI')")
+        self.page.click("#tasks-list li:has-text('написать тесты') button")
+        self.page.wait_for_selector("#tasks-bar:has-text('0 открыто')")
+        self.assertEqual([(t["text"], t["done"]) for t in self.agent.ws.tasks.items()], [("починить CI", True)])
+        self.agent.ws.tasks.remove(1)
+
+    def test_ci_watch(self):
+        states = iter(["pending", "failure"])
+        failed = [{"name": "tests", "failed": [{"job": "e2e", "steps": ["E2E"], "url": "u"}]}]
+        self.page.route("**/api/ci", lambda route: route.fulfill(json={"state": next(states, "failure"),
+                                                                       "sha": "abcdef1234", "runs": failed}))
+        self.page.add_init_script("localStorage.setItem('aiko-watch', '1')")
+        self.page.clock.install()
+        self.chat_replies({"type": "head", "head": "abcdef1234"}, {"type": "reply", "text": "закоммитила"})
+        self.open()
+        self.say("закоммить")
+        self.page.wait_for_selector("text=закоммитила")
+        self.page.clock.fast_forward(6_000)    # первая проверка: ещё идёт
+        self.page.clock.fast_forward(241_000)  # вторая (без токена — через 4 минуты): упал
+        self.page.wait_for_selector("text=🔴 CI упал для abcdef1: e2e → E2E")
+        self.assertTrue(self.page.is_visible("#ci-fix"))
+        sent = []
+        self.page.route("**/api/chat", lambda route: sent.append(json.loads(route.request.post_data)["action"])
+                        or route.fulfill(body=json.dumps({"type": "reply", "text": "смотрю"}) + "\n"))
+        self.page.click("#ci-fix")
+        self.page.wait_for_selector("text=смотрю")
+        self.assertEqual(sent, ["ci_fail"])
+
+    def test_pr_card(self):
+        self.page.context.grant_permissions(["clipboard-read", "clipboard-write"])
+        self.chat_replies({"type": "pr", "title": "Семёрка вместо 42", "body": "## Зачем\n- потому что"},
+                          {"type": "reply", "text": "PR готов"})
+        self.open()
+        self.page.click("#actions button[data-action=pr]")
+        self.page.wait_for_selector(".msg.pr .pr-title:has-text('Семёрка вместо 42')")
+        self.page.click(".msg.pr button")
+        self.page.wait_for_selector("text=✅ Скопировано")
+        self.assertEqual(self.page.evaluate("navigator.clipboard.readText()"), "Семёрка вместо 42\n\n## Зачем\n- потому что")
 
     def test_allowed_commands_in_menu(self):
         self.agent.ws.set_allowed("make lint", True)
@@ -249,7 +316,7 @@ class MicTest(UiTest):
     # тесты родителя здесь не повторяем
     test_page_loads = test_run_confirm_allow_always = test_commit_message_is_editable = None
     test_undo_confirm = test_diff_on_screen = test_spent_counter_and_expensive_turn = test_edit_confirm = None
-    test_skill_buttons = test_allowed_commands_in_menu = test_twitch_chat = None
+    test_skill_buttons = test_allowed_commands_in_menu = test_twitch_chat = test_task_plan = test_ci_watch = test_pr_card = None
 
     def heard(self, *texts):
         """Распознавание отдаёт фразы по очереди, потом — пустоту."""
@@ -281,12 +348,13 @@ class MicTest(UiTest):
         self.assertEqual(json.loads(self.page.evaluate("localStorage.getItem('aiko-voice')"))["n"], 1)
 
     def test_wake_word(self):
-        self.heard("просто болтаю с котом", "Айко, который час?")
+        self.page.route("**/api/stt", lambda route: route.fulfill(json={"text": ""}))  # пока не в режиме ✨
         self.open()
         self.page.click("#mic")
         self.page.wait_for_selector("#mic.on")
         self.page.click("#mic")
         self.page.wait_for_selector("#mic.on.wake")
+        self.heard("просто болтаю с котом", "Айко, который час?")  # фразы — только после включения режима
         self.assertEqual(self.page.text_content("#mic"), "✨")
         self.wait_for(lambda: self.sent)
         self.assertEqual(self.sent, ["который час?"])  # фраза коту в чат не ушла, имя срезано
