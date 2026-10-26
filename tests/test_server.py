@@ -653,6 +653,30 @@ class UsageTest(Base):
         self.assertEqual(usage.today()["requests"], 0)
 
 
+class DayReportTest(GitUserBase):
+    def test_goodbye_detection(self):
+        agent = agent_mod.Agent(self.ws, "key", "model")
+        for bye in ["Пока!", "пока, Айко", "ну всё, пока-пока", "Спасибо, до завтра!", "спокойной ночи ❤",
+                    "ладно, я спать", "bye"]:
+            self.assertIn("семпай прощается", agent.prepare(bye), bye)
+        for text in ["пока не понимаю, как работает quest.py", "пока что тесты падают", "Пока ты тут — глянь diff",
+                     "до завтра нужно починить CI, поможешь?" + " очень" * 30]:
+            self.assertEqual(agent.prepare(text), text, text)
+
+    def test_report_facts(self):
+        git = ["git", "-C", str(self.root)]
+        subprocess.run([*git, "commit", "-qam", "починила main"], check=True)
+        self.ws.quest.complete("tests")
+        usage.add({"cost": 0.12, "total_tokens": 10})
+        report = agent_mod.Agent(self.ws, "key", "model").prepare("пока", {"reminders": 3})
+        self.assertIn("починила main", report)
+        self.assertIn("Коммитов сегодня: 2", report)  # init из make_project — тоже сегодня
+        self.assertIn("Прогнать тесты", report)
+        self.assertIn("$0.12", report)
+        self.assertIn("напоминаний (помидорки, перерывы): 3", report)
+        self.assertNotIn("напоминаний", agent_mod.Agent(self.ws, "key", "model").prepare("пока", {"reminders": "x"}))
+
+
 class TraceTest(unittest.TestCase):
     TRACES = [
         'Traceback (most recent call last):\n  File "src/app.py", line 2, in main\nZeroDivisionError',

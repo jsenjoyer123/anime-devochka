@@ -724,7 +724,7 @@ async function ask(payload) {
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...payload, mood }),
+      body: JSON.stringify({ ...payload, mood, day: dayStats() }),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
@@ -1190,12 +1190,25 @@ function addReminder(minutes, text) {
   if ("Notification" in window && Notification.permission === "default") Notification.requestPermission();
 }
 
+// статистика дня для вечернего итога (напоминания живут только в браузере)
+const DAY_KEY = "aiko-day";
+function dayStats() {
+  const today = new Date().toDateString();
+  try {
+    const d = JSON.parse(localStorage.getItem(DAY_KEY));
+    if (d?.date === today) return d;
+  } catch {}
+  return { date: today, reminders: 0 };
+}
+
 function checkReminders() {
   const now = Date.now();
   const list = loadReminders();
   const due = list.filter((r) => r.due <= now);
   if (!due.length) return;
   saveReminders(list.filter((r) => r.due > now));
+  const day = dayStats();
+  localStorage.setItem(DAY_KEY, JSON.stringify({ ...day, reminders: day.reminders + due.length }));
   for (const r of due) {
     wakeUp();
     addMessage("aiko", `⏰ ${r.text}`);

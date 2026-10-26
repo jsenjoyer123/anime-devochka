@@ -13,7 +13,7 @@ from pathlib import Path
 import devtools
 import usage
 import workspace
-from agent import Agent, TASKS, with_trace_task
+from agent import Agent, TASKS
 from llm import MAX_AUDIO_BYTES, MAX_TTS_CHARS, edge_tts, synthesize, transcribe
 from workspace import MAX_RECENT, Workspace
 
@@ -251,8 +251,9 @@ class Handler(SimpleHTTPRequestHandler):
         if not text:
             return self._json(400, {"error": "пустое сообщение"})
         shown = None
-        if label is None and (wrapped := with_trace_task(text)) != text:
-            shown, text = text, wrapped  # в чате сохранится стектрейс как есть, без служебного задания
+        day = body.get("day") if isinstance(body.get("day"), dict) else None
+        if label is None and (prepared := agent.prepare(text, day)) != text:
+            shown, text = text, prepared  # в чате сохранится реплика семпая как есть, без служебного задания
         try:
             agent.mood = max(-1.0, min(1.0, float(body.get("mood") or 0)))
         except (TypeError, ValueError):

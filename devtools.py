@@ -123,6 +123,14 @@ def commits_since(root: Path, timestamp: float) -> int:
     return int(out) if out.isdigit() else 0
 
 
+def today_log(root: Path, limit: int = 30) -> list[str]:
+    """Коммиты с полуночи: «хеш сообщение»; пусто, если не git или коммитов не было."""
+    out = _git(root, "log", f"-n{limit}", "--since=midnight", "--format=%h %s")
+    if out.startswith(("Это не", "git ")) or out == "(пусто)":
+        return []
+    return out.splitlines()
+
+
 def head(root: Path) -> str:
     """Хеш текущего коммита; пусто, если коммитов ещё нет."""
     out = _git(root, "rev-parse", "--verify", "-q", "HEAD")

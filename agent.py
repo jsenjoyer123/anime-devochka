@@ -145,6 +145,17 @@ TRACE_RE = re.compile(
 )
 
 
+# прощание семпая — повод подвести итог дня. «Пока» бывает и «пока что» («пока не понимаю…»),
+# поэтому прощанием считаем, только если после него конец фразы, обращение или «до …»
+GOODBYE_RE = re.compile(
+    r"^\W*(?:(?:ну|ладно|всё|все|ок|окей|спасибо)\W+)*"
+    r"(?:пока(?=\W*(?:$|айко|семпай|-|пока|до |увидимся|спасибо))|до завтра|до встречи|спокойной ночи|"
+    r"споки|всё на сегодня|все на сегодня|я спать|я ушёл|я ушел|я ушла|bye|good ?night)",
+    re.IGNORECASE,
+)
+MAX_GOODBYE_CHARS = 120  # длинное сообщение — это уже не прощание, а вопрос
+
+
 def with_trace_task(text: str) -> str:
     """Сообщение со стектрейсом превращаем в задание разобрать его по коду."""
     return f"{TRACE_TASK}\n\n```\n{text}\n```" if TRACE_RE.search(text) else text
@@ -490,6 +501,35 @@ class Agent:
         if self.ws.notes_path.is_file():
             s += "\nТвои заметки с онбординга:\n\n" + self.ws.notes_path.read_text(encoding="utf-8")
         return s
+
+    def prepare(self, text: str, day: dict | None = None) -> str:
+        """Дописать к реплике семпая служебное задание, если она того просит:
+        стектрейс — разобрать по коду, прощание — подвести итог дня."""
+        text = with_trace_task(text)
+        if len(text) <= MAX_GOODBYE_CHARS and GOODBYE_RE.search(text):
+            text += "\n\n" + self.day_report(day or {})
+        return text
+
+    def day_report(self, day: dict) -> str:
+        """Факты дня для вечернего итога: коммиты, квест, расходы, напоминания."""
+        today = f"{datetime.date.today():%d.%m.%Y}"
+        commits = devtools.today_log(self.ws.root)
+        steps = [s["title"] for s in self.ws.quest.state()["steps"] if self.ws.quest.done().get(s["id"]) == today]
+        lines = [f"Коммитов сегодня: {len(commits)}" + (": " + "; ".join(commits[:8]) if commits else ".")]
+        if steps:
+            lines.append("Шаги квеста за сегодня: " + "; ".join(steps) + ".")
+        spent = usage.today()
+        if spent["requests"]:
+            lines.append(f"Ты сегодня думала {spent['requests']} раз, это стоило ${spent['cost']:.2f}.")
+        try:
+            reminders = max(0, int(day.get("reminders") or 0))
+        except (TypeError, ValueError):
+            reminders = 0
+        if reminders:
+            lines.append(f"Сработало напоминаний (помидорки, перерывы): {reminders}.")
+        return ("(Системная подсказка: семпай прощается. Тепло попрощайся и коротко, в 2–4 предложениях, "
+                "подведи итог дня по фактам ниже — похвали за сделанное, можно пошутить; если день был "
+                "пустой, не дави. Инструменты не нужны.)\n" + "\n".join(lines))
 
     def set_editor(self, data: dict) -> bool:
         """Контекст редактора от VS Code. Файлы вне проекта и секреты не принимаем:
