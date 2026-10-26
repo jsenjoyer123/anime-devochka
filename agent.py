@@ -4,6 +4,7 @@
 
 import datetime
 import json
+import re
 import threading
 import time
 import uuid
@@ -123,6 +124,31 @@ NEW_COMMIT_TASK = """(Системное событие, не сообщение
 одной-двумя фразами, как стример: похвали, подколи или удивись по сути изменений \
 («о, рефакторинг auth, смело!»). Если это не новый коммит, а pull или смена ветки — отреагируй на это. \
 Ничего не показывай на экране и ревью не устраивай."""
+
+TRACE_TASK = """Семпай прислал ошибку со стектрейсом (ниже). Разберись по-настоящему: вытащи из трейса \
+пути и номера строк, которые относятся к этому проекту (библиотечные кадры пропускай), открой их \
+через read_file или search и пойми, что случилось и почему. Покажи главное место через show_code. \
+Ответ: что сломалось простыми словами, настоящая причина (а не просто последняя строка трейса) \
+и как починить — 1–3 конкретных шага. Не копай бесконечно: обычно хватает 3–6 инструментов, команды \
+для этого не запускай. Если первый кадр трейса — вне проекта (`<string>`, `<stdin>`, REPL, тест, \
+чужой скрипт), причина обычно в нём: скажи, что туда передали не так и чего ждёт код проекта. \
+Если строк проекта в трейсе нет вовсе — скажи, где искать дальше."""
+
+# признаки стектрейса: Python, JS/Node, Java/Kotlin, Go, Rust
+TRACE_RE = re.compile(
+    r"Traceback \(most recent call last\)"
+    r"|^\s+at .+[:(]\S+:\d+"
+    r"|^\s+at [\w$.<>]+\([\w$.]+\.(?:java|kt|scala):\d+\)"
+    r"|^goroutine \d+ \[|^panic: "
+    r"|thread '.+' panicked at",
+    re.MULTILINE,
+)
+
+
+def with_trace_task(text: str) -> str:
+    """Сообщение со стектрейсом превращаем в задание разобрать его по коду."""
+    return f"{TRACE_TASK}\n\n```\n{text}\n```" if TRACE_RE.search(text) else text
+
 
 QUIZ_TASK = """Устрой семпаю экзамен по проекту: 5 вопросов от простого к сложному \
 (назначение проекта, запуск, архитектура, конкретный модуль, «что будет, если…»). \
@@ -618,9 +644,10 @@ class Agent:
             usage.add(data["usage"])
         return data["choices"][0]["message"].get("content") or ""
 
-    def run(self, user_text: str, emit, label: str | None = None) -> None:
+    def run(self, user_text: str, emit, label: str | None = None, shown: str | None = None) -> None:
         """Один ход агента. emit(dict) отправляет события в браузер;
-        label — как показать реплику семпая в сохранённом чате (для служебных заданий)."""
+        label — как показать служебное задание в сохранённом чате (сама реплика семпая не сохраняется);
+        shown — что сохранить вместо user_text, если к реплике семпая дописано задание."""
         reply: list[str] = []
 
         def capture(ev: dict) -> None:
@@ -635,7 +662,7 @@ class Agent:
             raise
         finally:
             if reply:
-                self._save_turn(label or user_text, reply[0], internal=label is not None)
+                self._save_turn(label or shown or user_text, reply[0], internal=label is not None)
 
     def _load_transcript(self) -> list[dict]:
         try:

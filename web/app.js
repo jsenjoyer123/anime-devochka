@@ -1082,6 +1082,13 @@ canvas.addEventListener("pointerdown", (e) => {
   }
 });
 
+// вставили стектрейс — она заранее оживляется (разбирать его по коду будет сервер)
+const TRACE_HINT = /Traceback \(most recent call last\)|^\s+at .+:\d+|^goroutine \d+ \[|^panic: |panicked at/m;
+input.addEventListener("paste", (e) => {
+  const text = e.clipboardData?.getData("text") || "";
+  if (TRACE_HINT.test(text)) quip(pick(["[surprised] Ой, стектрейс! Отправляй — найду, где болит.", "[think] Так-так, ошибочка... Жми «отправить», разберу по коду."]));
+});
+
 // семпай начал печатать — замолкаем, как на стриме, когда чат перебивает
 input.addEventListener("keydown", () => {
   if (state.talking && !state.thinking) stopSpeaking();

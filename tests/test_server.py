@@ -57,8 +57,10 @@ class Base(unittest.TestCase):
         self.root.mkdir()
         make_project(self.root)
         self.notes = self.tmp / "notes"
-        # общая память и список проектов — тоже во временной папке
-        self._paths = (workspace.SENPAI_PATH, workspace.RECENT_PATH, workspace.USAGE_PATH, workspace.SKILLS_DIR)
+        # вся память Айко — во временной папке: open_project кладёт заметки проекта в NOTES_DIR
+        self._paths = (workspace.NOTES_DIR, workspace.SENPAI_PATH, workspace.RECENT_PATH, workspace.USAGE_PATH,
+                       workspace.SKILLS_DIR)
+        workspace.NOTES_DIR = self.notes
         workspace.SENPAI_PATH = self.notes / "_senpai.md"
         workspace.RECENT_PATH = self.notes / "_projects.json"
         workspace.USAGE_PATH = self.notes / "_usage.json"
@@ -66,7 +68,8 @@ class Base(unittest.TestCase):
         self.ws = workspace.Workspace(self.root, self.notes / "proj.md")
 
     def tearDown(self):
-        workspace.SENPAI_PATH, workspace.RECENT_PATH, workspace.USAGE_PATH, workspace.SKILLS_DIR = self._paths
+        (workspace.NOTES_DIR, workspace.SENPAI_PATH, workspace.RECENT_PATH, workspace.USAGE_PATH,
+         workspace.SKILLS_DIR) = self._paths
         shutil.rmtree(self.tmp)
 
 
@@ -265,6 +268,17 @@ class HttpTest(Base):
         with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/api/status", timeout=5) as r:
             self.assertEqual(json.load(r)["skills"], [{"id": "hello", "title": "👋 Привет", "hint": ""}])
         self.assertEqual(self.post("/api/chat", {"action": "skill:nope"})[0], 400)
+
+    def test_trace_message_gets_task_but_chat_keeps_it_raw(self):
+        trace = TraceTest.TRACES[0]
+        http_api.AGENT._llm = scripted({"role": "assistant", "content": "деление на ноль"})
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/chat",
+                                     data=json.dumps({"message": trace}).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            r.read()
+        self.assertTrue(http_api.AGENT.history[0]["content"].startswith(agent_mod.TRACE_TASK))
+        self.assertEqual([m["content"] for m in http_api.AGENT.transcript], [trace, "деление на ноль"])
 
     def test_annotations_endpoint(self):
         http_api.AGENT.set_annotations([{"path": "src/app.py", "line": 1, "message": "хм"}])
@@ -637,6 +651,26 @@ class UsageTest(Base):
     def test_bad_usage_is_ignored(self):
         usage.add({"cost": "много"})
         self.assertEqual(usage.today()["requests"], 0)
+
+
+class TraceTest(unittest.TestCase):
+    TRACES = [
+        'Traceback (most recent call last):\n  File "src/app.py", line 2, in main\nZeroDivisionError',
+        "TypeError: x is undefined\n    at render (/home/s/web/app.js:42:7)\n    at main (app.js:1:1)",
+        "Exception in thread main java.lang.NullPointerException\n\tat com.acme.App.run(App.java:12)",
+        "panic: runtime error: index out of range\n\ngoroutine 1 [running]:\nmain.main()",
+        "thread 'main' panicked at src/main.rs:4:5:\nattempt to divide by zero",
+    ]
+
+    def test_detects_traces(self):
+        for trace in self.TRACES:
+            wrapped = agent_mod.with_trace_task(trace)
+            self.assertTrue(wrapped.startswith(agent_mod.TRACE_TASK), trace)
+            self.assertIn(trace, wrapped)
+
+    def test_plain_messages_untouched(self):
+        for text in ["посмотри at app.py:12, пожалуйста", "что такое panic в Go?", "Traceback — это что?"]:
+            self.assertEqual(agent_mod.with_trace_task(text), text)
 
 
 class SeasonTest(unittest.TestCase):

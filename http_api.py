@@ -13,7 +13,7 @@ from pathlib import Path
 import devtools
 import usage
 import workspace
-from agent import Agent, TASKS
+from agent import Agent, TASKS, with_trace_task
 from llm import MAX_AUDIO_BYTES, MAX_TTS_CHARS, edge_tts, synthesize, transcribe
 from workspace import MAX_RECENT, Workspace
 
@@ -250,6 +250,9 @@ class Handler(SimpleHTTPRequestHandler):
             label = f"[{action}]" if action in TASKS else None
         if not text:
             return self._json(400, {"error": "пустое сообщение"})
+        shown = None
+        if label is None and (wrapped := with_trace_task(text)) != text:
+            shown, text = text, wrapped  # в чате сохранится стектрейс как есть, без служебного задания
         try:
             agent.mood = max(-1.0, min(1.0, float(body.get("mood") or 0)))
         except (TypeError, ValueError):
@@ -268,7 +271,7 @@ class Handler(SimpleHTTPRequestHandler):
             self.wfile.flush()
 
         try:
-            agent.run(text, emit, label)
+            agent.run(text, emit, label, shown)
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as e:
